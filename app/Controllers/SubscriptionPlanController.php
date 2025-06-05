@@ -5,6 +5,7 @@ namespace App\Controllers;
 use App\Helpers\Database;
 use App\Helpers\Session;
 use App\Helpers\Logger;
+use App\Helpers\Config;
 
 class SubscriptionPlanController
 {
@@ -80,7 +81,7 @@ class SubscriptionPlanController
             ]);
         }
     }
-    
+
     private function loadView($viewPath, $data = [])
     {
         // Extraire les variables pour qu'elles soient disponibles dans la vue
@@ -97,6 +98,529 @@ class SubscriptionPlanController
             require_once $viewFile;
         } else {
             throw new \Exception("Vue non trouvée : {$viewFile}");
+        }
+    }
+
+    public function create()
+    {
+        // Récupérer les modèles de matériel pour le formulaire
+        $materials = Database::query("
+            SELECT id, nom, description, prix_mensuel, depot_garantie 
+            FROM modeles_materiel 
+            WHERE actif = 1 
+            ORDER BY nom
+        ")->fetchAll();
+
+        $pageTitle = 'Créer une formule d\'abonnement';
+        require_once 'app/Views/subscriptions/plans/create.php';
+    }
+
+    public function store()
+    {
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            header('Location: /subscription-plans/create');
+            exit;
+        }
+
+        // Vérification CSRF
+        if (!Session::verifyCsrfToken($_POST['csrf_token'] ?? '')) {
+            Session::setFlash('error', 'Token de sécurité invalide');
+            header('Location: /subscription-plans/create');
+            exit;
+        }
+
+        // Validation des données
+        $data = $this->validatePlanData($_POST);
+        if ($data === false) {
+            header('Location: /subscription-plans/create');
+            exit;
+        }
+
+        try {
+            Database::beginTransaction();
+
+            // Debug : Afficher les données à insérer
+            Logger::debug('Données à insérer pour la formule', $data);
+
+            // Insérer la formule
+            $planId = Database::insert('formules_abonnement', $data);
+            
+            if (!$planId) {
+                throw new \Exception('Erreur lors de l\'insertion de la formule en base de données');
+            }
+
+            Logger::info('Formule créée en base de données', [
+                'plan_id' => $planId,
+                'name' => $data['nom']
+            ]);
+
+            // Créer le produit Stripe après l'insertion en base
+            $this->createStripeProduct($planId, $data);
+
+            Database::commit();
+
+            Session::setFlash('success', 'Formule d\'abonnement créée avec succès');
+            header('Location: /subscription-plans');
+            exit;
+
+        } catch (\Exception $e) {
+            Database::rollback();
+            
+            Logger::error("Erreur lors de la création de la formule", [
+                'error' => $e->getMessage(),
+                'data' => $data,
+                'trace' => $e->getTraceAsString()
+            ]);
+            
+            // Message d'erreur plus détaillé en mode debug
+            $errorMessage = 'Erreur lors de la création de la formule';
+            if (\App\Helpers\Config::get('app.debug', false)) {
+                $errorMessage .= ': ' . $e->getMessage();
+            }
+            
+            Session::setFlash('error', $errorMessage);
+            header('Location: /subscription-plans/create');
+            exit;
+        }
+    }
+
+    public function edit($id)
+    {
+        try {
+            // Récupérer la formule
+            $plan = Database::fetch("
+                SELECT fa.*, mm.nom as materiel_nom 
+                FROM formules_abonnement fa
+                LEFT JOIN modeles_materiel mm ON fa.modele_materiel_id = mm.id
+                WHERE fa.id = ?
+            ", [$id]);
+
+            if (!$plan) {
+                Session::setFlash('error', 'Formule non trouvée');
+                header('Location: /subscription-plans');
+                exit;
+            }
+
+            // Récupérer les modèles de matériel
+            $materials = Database::query("
+                SELECT id, nom, description, prix_mensuel, depot_garantie 
+                FROM modeles_materiel 
+                WHERE actif = 1 
+                ORDER BY nom
+            ")->fetchAll();
+
+            $pageTitle = 'Modifier la formule d\'abonnement';
+            require_once 'app/Views/subscriptions/plans/edit.php';
+
+        } catch (\Exception $e) {
+            Logger::error("Erreur lors de la récupération de la formule", [
+                'plan_id' => $id,
+                'error' => $e->getMessage()
+            ]);
+            Session::setFlash('error', 'Erreur lors du chargement de la formule');
+            header('Location: /subscription-plans');
+            exit;
+        }
+    }
+
+    public function update($id)
+    {
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            header('Location: /subscription-plans/' . $id . '/edit');
+            exit;
+        }
+
+        // Vérification CSRF
+        if (!Session::verifyCsrfToken($_POST['csrf_token'] ?? '')) {
+            Session::setFlash('error', 'Token de sécurité invalide');
+            header('Location: /subscription-plans/' . $id . '/edit');
+            exit;
+        }
+
+        // Vérifier que la formule existe
+        $existingPlan = Database::fetch("SELECT * FROM formules_abonnement WHERE id = ?", [$id]);
+        if (!$existingPlan) {
+            Session::setFlash('error', 'Formule non trouvée');
+            header('Location: /subscription-plans');
+            exit;
+        }
+
+        // Validation des données
+        $data = $this->validatePlanData($_POST, $id);
+        if ($data === false) {
+            header('Location: /subscription-plans/' . $id . '/edit');
+            exit;
+        }
+
+        try {
+            Database::beginTransaction();
+
+            // Mettre à jour la formule
+            Database::update('formules_abonnement', $data, 'id = ?', [$id]);
+
+            // Log de modification
+            Logger::info('Formule d\'abonnement modifiée', [
+                'plan_id' => $id,
+                'name' => $data['nom'],
+                'changes' => array_diff_assoc($data, $existingPlan)
+            ]);
+
+            // TODO: Mettre à jour le produit Stripe si nécessaire
+            $this->updateStripeProduct($id, $data, $existingPlan);
+
+            Database::commit();
+
+            Session::setFlash('success', 'Formule d\'abonnement modifiée avec succès');
+            header('Location: /subscription-plans');
+            exit;
+
+        } catch (\Exception $e) {
+            Database::rollback();
+            Logger::error("Erreur lors de la modification de la formule", [
+                'plan_id' => $id,
+                'error' => $e->getMessage(),
+                'data' => $data
+            ]);
+            Session::setFlash('error', 'Erreur lors de la modification de la formule');
+            header('Location: /subscription-plans/' . $id . '/edit');
+            exit;
+        }
+    }
+
+    public function toggleStatus($id)
+    {
+        try {
+            $plan = Database::fetch("SELECT * FROM formules_abonnement WHERE id = ?", [$id]);
+            if (!$plan) {
+                Session::setFlash('error', 'Formule non trouvée');
+                header('Location: /subscription-plans');
+                exit;
+            }
+
+            $newStatus = $plan['actif'] ? 0 : 1;
+            Database::update('formules_abonnement', ['actif' => $newStatus], 'id = ?', [$id]);
+
+            Logger::info('Statut de formule modifié', [
+                'plan_id' => $id,
+                'old_status' => $plan['actif'],
+                'new_status' => $newStatus
+            ]);
+
+            $statusText = $newStatus ? 'activée' : 'désactivée';
+            Session::setFlash('success', "Formule {$statusText} avec succès");
+
+        } catch (\Exception $e) {
+            Logger::error("Erreur lors de la modification du statut", [
+                'plan_id' => $id,
+                'error' => $e->getMessage()
+            ]);
+            Session::setFlash('error', 'Erreur lors de la modification du statut');
+        }
+
+        header('Location: /subscription-plans');
+        exit;
+    }
+
+    public function delete($id)
+    {
+        try {
+            // Vérifier que la formule existe
+            $plan = Database::fetch("SELECT * FROM formules_abonnement WHERE id = ?", [$id]);
+            if (!$plan) {
+                Session::setFlash('error', 'Formule non trouvée');
+                header('Location: /subscription-plans');
+                exit;
+            }
+
+            // Vérifier qu'aucun abonnement n'utilise cette formule
+            $subscriptionsCount = Database::fetch("
+                SELECT COUNT(*) as count 
+                FROM abonnements_clients 
+                WHERE formule_id = ? AND statut IN ('actif', 'en_attente')
+            ", [$id]);
+
+            if ($subscriptionsCount['count'] > 0) {
+                Session::setFlash('error', 'Impossible de supprimer une formule utilisée par des abonnements actifs');
+                header('Location: /subscription-plans');
+                exit;
+            }
+
+            Database::beginTransaction();
+
+            // Supprimer la formule
+            Database::delete('formules_abonnement', 'id = ?', [$id]);
+
+            Logger::info('Formule d\'abonnement supprimée', [
+                'plan_id' => $id,
+                'plan_name' => $plan['nom']
+            ]);
+
+            // TODO: Supprimer le produit Stripe
+            $this->deleteStripeProduct($plan);
+
+            Database::commit();
+
+            Session::setFlash('success', 'Formule supprimée avec succès');
+
+        } catch (\Exception $e) {
+            Database::rollback();
+            Logger::error("Erreur lors de la suppression de la formule", [
+                'plan_id' => $id,
+                'error' => $e->getMessage()
+            ]);
+            Session::setFlash('error', 'Erreur lors de la suppression de la formule');
+        }
+
+        header('Location: /subscription-plans');
+        exit;
+    }
+
+    private function validatePlanData($data, $planId = null)
+    {
+        $errors = [];
+
+        // Validation du nom
+        if (empty($data['nom'])) {
+            $errors[] = 'Le nom de la formule est obligatoire';
+        } elseif (strlen($data['nom']) > 100) {
+            $errors[] = 'Le nom ne peut pas dépasser 100 caractères';
+        }
+
+        // Vérifier l'unicité du nom
+        $nameQuery = "SELECT id FROM formules_abonnement WHERE nom = ?";
+        $nameParams = [$data['nom']];
+        
+        if ($planId) {
+            $nameQuery .= " AND id != ?";
+            $nameParams[] = $planId;
+        }
+        
+        $existingPlan = Database::fetch($nameQuery, $nameParams);
+        if ($existingPlan) {
+            $errors[] = 'Ce nom de formule existe déjà';
+        }
+
+        // Validation du type d'abonnement
+        if (!in_array($data['type_abonnement'], ['application', 'application_materiel', 'materiel_seul'])) {
+            $errors[] = 'Type d\'abonnement invalide';
+        }
+
+        // Validation du nombre d'utilisateurs
+        if (!is_numeric($data['nombre_utilisateurs_inclus']) || $data['nombre_utilisateurs_inclus'] < 0) {
+            $errors[] = 'Le nombre d\'utilisateurs inclus doit être un nombre positif';
+        }
+
+        // Validation du coût utilisateur supplémentaire
+        if (!empty($data['cout_utilisateur_supplementaire'])) {
+            if (!is_numeric($data['cout_utilisateur_supplementaire']) || $data['cout_utilisateur_supplementaire'] < 0) {
+                $errors[] = 'Le coût par utilisateur supplémentaire doit être un nombre positif';
+            }
+        }
+
+        // Validation de la durée
+        if (!in_array($data['duree'], ['mensuelle', 'annuelle'])) {
+            $errors[] = 'Durée invalide';
+        }
+
+        // Validation du nombre de sous-catégories
+        if (!empty($data['nombre_sous_categories'])) {
+            if (!is_numeric($data['nombre_sous_categories']) || $data['nombre_sous_categories'] < 0) {
+                $errors[] = 'Le nombre de sous-catégories doit être un nombre positif';
+            }
+        }
+
+        // Validation du prix de base
+        if (!is_numeric($data['prix_base']) || $data['prix_base'] < 0) {
+            $errors[] = 'Le prix de base doit être un nombre positif';
+        }
+
+        // Validation du matériel pour les types qui l'incluent
+        if (in_array($data['type_abonnement'], ['application_materiel', 'materiel_seul'])) {
+            if (empty($data['modele_materiel_id'])) {
+                $errors[] = 'Le modèle de matériel est obligatoire pour ce type d\'abonnement';
+            } else {
+                $material = Database::fetch("SELECT id FROM modeles_materiel WHERE id = ? AND actif = 1", [$data['modele_materiel_id']]);
+                if (!$material) {
+                    $errors[] = 'Modèle de matériel invalide';
+                }
+            }
+        }
+
+        if (!empty($errors)) {
+            foreach ($errors as $error) {
+                Session::setFlash('error', $error);
+            }
+            return false;
+        }
+
+        // Préparer les données nettoyées avec des valeurs par défaut pour éviter les erreurs SQL
+        $cleanData = [
+            'nom' => trim($data['nom']),
+            'type_abonnement' => $data['type_abonnement'],
+            'nombre_utilisateurs_inclus' => (int)$data['nombre_utilisateurs_inclus'],
+            'cout_utilisateur_supplementaire' => !empty($data['cout_utilisateur_supplementaire']) ? (float)$data['cout_utilisateur_supplementaire'] : null,
+            'duree' => $data['duree'],
+            'nombre_sous_categories' => !empty($data['nombre_sous_categories']) ? (int)$data['nombre_sous_categories'] : null,
+            'prix_base' => (float)$data['prix_base'],
+            'modele_materiel_id' => !empty($data['modele_materiel_id']) ? (int)$data['modele_materiel_id'] : null,
+            'stripe_product_id' => null,
+            'stripe_price_id' => null,
+            'stripe_price_supplementaire_id' => null,
+            'lien_inscription' => null,
+            'actif' => isset($data['actif']) ? 1 : 0,
+            'date_creation' => date('Y-m-d H:i:s')
+        ];
+
+        // Debug : Logger les données nettoyées
+        Logger::debug('Données validées et nettoyées pour la formule', $cleanData);
+
+        return $cleanData;
+    }
+
+    private function createStripeProduct($planId, $data)
+    {
+        try {
+            // Ajouter l'ID du plan aux données
+            $data['id'] = $planId;
+            
+            // Créer le produit Stripe
+            $product = \App\Services\StripeService::createProduct($data);
+            
+            // Créer le prix principal
+            $price = \App\Services\StripeService::createPrice($product->id, $data);
+            
+            // Créer le prix pour les utilisateurs supplémentaires si nécessaire
+            $extraUserPrice = null;
+            if (!empty($data['cout_utilisateur_supplementaire']) && $data['cout_utilisateur_supplementaire'] > 0) {
+                $extraUserPrice = \App\Services\StripeService::createExtraUserPrice($product->id, $data);
+            }
+            
+            // Mettre à jour la formule avec les IDs Stripe
+            $updateData = [
+                'stripe_product_id' => $product->id,
+                'stripe_price_id' => $price->id
+            ];
+            
+            if ($extraUserPrice) {
+                $updateData['stripe_price_supplementaire_id'] = $extraUserPrice->id;
+            }
+            
+            Database::update('formules_abonnement', $updateData, 'id = ?', [$planId]);
+            
+            Logger::info('Formule synchronisée avec Stripe', [
+                'plan_id' => $planId,
+                'product_id' => $product->id,
+                'price_id' => $price->id,
+                'extra_price_id' => $extraUserPrice ? $extraUserPrice->id : null
+            ]);
+            
+        } catch (\Exception $e) {
+            Logger::error('Erreur lors de la création du produit Stripe', [
+                'plan_id' => $planId,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            
+            // Ne pas faire échouer la création de la formule si Stripe échoue
+            // Mais informer l'utilisateur
+            Session::setFlash('warning', 'Formule créée mais synchronisation Stripe échouée: ' . $e->getMessage());
+        }
+    }
+
+    private function updateStripeProduct($planId, $newData, $oldData)
+    {
+        try {
+            if (empty($oldData['stripe_product_id'])) {
+                // Si pas de produit Stripe existant, le créer
+                $this->createStripeProduct($planId, $newData);
+                return;
+            }
+            
+            // Ajouter l'ID du plan aux données
+            $newData['id'] = $planId;
+            
+            // Mettre à jour le produit Stripe
+            \App\Services\StripeService::updateProduct($oldData['stripe_product_id'], $newData);
+            
+            // Si le prix a changé, créer un nouveau prix (Stripe ne permet pas de modifier les prix existants)
+            if ($newData['prix_base'] != $oldData['prix_base'] || $newData['duree'] != $oldData['duree']) {
+                $newPrice = \App\Services\StripeService::createPrice($oldData['stripe_product_id'], $newData);
+                
+                // Mettre à jour l'ID du prix
+                Database::update('formules_abonnement', 
+                    ['stripe_price_id' => $newPrice->id], 
+                    'id = ?', 
+                    [$planId]
+                );
+                
+                Logger::info('Nouveau prix Stripe créé pour la formule', [
+                    'plan_id' => $planId,
+                    'old_price_id' => $oldData['stripe_price_id'],
+                    'new_price_id' => $newPrice->id
+                ]);
+            }
+            
+            // Gérer le prix des utilisateurs supplémentaires
+            $oldExtraCost = $oldData['cout_utilisateur_supplementaire'] ?? 0;
+            $newExtraCost = $newData['cout_utilisateur_supplementaire'] ?? 0;
+            
+            if ($newExtraCost != $oldExtraCost) {
+                if ($newExtraCost > 0) {
+                    // Créer ou mettre à jour le prix supplémentaire
+                    $extraUserPrice = \App\Services\StripeService::createExtraUserPrice($oldData['stripe_product_id'], $newData);
+                    Database::update('formules_abonnement', 
+                        ['stripe_price_supplementaire_id' => $extraUserPrice->id], 
+                        'id = ?', 
+                        [$planId]
+                    );
+                } else {
+                    // Supprimer la référence au prix supplémentaire
+                    Database::update('formules_abonnement', 
+                        ['stripe_price_supplementaire_id' => null], 
+                        'id = ?', 
+                        [$planId]
+                    );
+                }
+            }
+            
+            Logger::info('Formule mise à jour sur Stripe', [
+                'plan_id' => $planId,
+                'product_id' => $oldData['stripe_product_id']
+            ]);
+            
+        } catch (\Exception $e) {
+            Logger::error('Erreur lors de la mise à jour du produit Stripe', [
+                'plan_id' => $planId,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            
+            Session::setFlash('warning', 'Formule modifiée mais synchronisation Stripe échouée: ' . $e->getMessage());
+        }
+    }
+
+    private function deleteStripeProduct($plan)
+    {
+        try {
+            if (!empty($plan['stripe_product_id'])) {
+                // Archiver le produit Stripe (pas de suppression définitive)
+                \App\Services\StripeService::archiveProduct($plan['stripe_product_id']);
+                
+                Logger::info('Produit Stripe archivé', [
+                    'plan_id' => $plan['id'],
+                    'product_id' => $plan['stripe_product_id']
+                ]);
+            }
+            
+        } catch (\Exception $e) {
+            Logger::error('Erreur lors de l\'archivage du produit Stripe', [
+                'plan_id' => $plan['id'],
+                'product_id' => $plan['stripe_product_id'] ?? null,
+                'error' => $e->getMessage()
+            ]);
+            
+            // Ne pas faire échouer la suppression de la formule si Stripe échoue
+            Session::setFlash('warning', 'Formule supprimée mais archivage Stripe échoué: ' . $e->getMessage());
         }
     }
 }
