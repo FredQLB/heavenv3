@@ -66,7 +66,7 @@ class Router
         }
 
         foreach ($this->routes as $route) {
-            if ($route['method'] === $requestMethod && $this->matchPath($route['path'], $requestUri)) {
+            if ($route['method'] === $requestMethod && $this->matchPath($route['path'], $requestUri, $params)) {
                 // Exécuter les middlewares
                 foreach ($route['middleware'] as $middlewareName) {
                     if (isset($this->middlewares[$middlewareName])) {
@@ -84,7 +84,12 @@ class Router
                     if (class_exists($controllerClass)) {
                         $controllerInstance = new $controllerClass();
                         if (method_exists($controllerInstance, $method)) {
-                            $controllerInstance->$method();
+                            // Passer les paramètres de route à la méthode
+                            if (!empty($params)) {
+                                $controllerInstance->$method(...array_values($params));
+                            } else {
+                                $controllerInstance->$method();
+                            }
                         } else {
                             throw new \Exception("Méthode {$method} non trouvée dans {$controllerClass}");
                         }
@@ -101,15 +106,47 @@ class Router
         exit;
     }
 
-    private function matchPath($routePath, $requestPath)
+    private function matchPath($routePath, $requestPath, &$params = [])
     {
-        // Pour cette version simple, on fait une correspondance exacte
+        // Nettoyer les chemins
         $routePath = rtrim($routePath, '/');
         if (empty($routePath)) {
             $routePath = '/';
         }
         
-        return $routePath === $requestPath;
+        // Si pas de paramètres dans la route, correspondance exacte
+        if (strpos($routePath, '{') === false) {
+            return $routePath === $requestPath;
+        }
+        
+        // Gérer les paramètres dynamiques
+        $routeSegments = explode('/', $routePath);
+        $requestSegments = explode('/', $requestPath);
+        
+        // Nombre de segments différent = pas de correspondance
+        if (count($routeSegments) !== count($requestSegments)) {
+            return false;
+        }
+        
+        $params = [];
+        
+        for ($i = 0; $i < count($routeSegments); $i++) {
+            $routeSegment = $routeSegments[$i];
+            $requestSegment = $requestSegments[$i];
+            
+            // Segment avec paramètre
+            if (preg_match('/\{([^}]+)\}/', $routeSegment, $matches)) {
+                $paramName = $matches[1];
+                $params[$paramName] = $requestSegment;
+            } else {
+                // Segment fixe - doit correspondre exactement
+                if ($routeSegment !== $requestSegment) {
+                    return false;
+                }
+            }
+        }
+        
+        return true;
     }
 }
 ?>

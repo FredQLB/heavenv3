@@ -91,10 +91,12 @@ class Database
     {
         $keys = array_keys($data);
         $fields = implode(',', $keys);
-        $placeholders = ':' . implode(',:', $keys);
+        $placeholders = implode(',', array_fill(0, count($keys), '?'));
         
         $sql = "INSERT INTO {$table} ({$fields}) VALUES ({$placeholders})";
-        self::query($sql, $data);
+        $values = array_values($data);
+        
+        self::query($sql, $values);
         
         return self::getConnection()->lastInsertId();
     }
@@ -102,13 +104,16 @@ class Database
     public static function update($table, $data, $where, $whereParams = [])
     {
         $fields = [];
-        foreach (array_keys($data) as $key) {
-            $fields[] = "{$key} = :{$key}";
+        $values = [];
+        
+        foreach ($data as $key => $value) {
+            $fields[] = "{$key} = ?";
+            $values[] = $value;
         }
         $fields = implode(',', $fields);
         
         $sql = "UPDATE {$table} SET {$fields} WHERE {$where}";
-        $params = array_merge($data, $whereParams);
+        $params = array_merge($values, $whereParams);
         
         return self::query($sql, $params)->rowCount();
     }
@@ -507,10 +512,10 @@ class DatabaseQueryBuilder
 
         $fields = [];
         $updateParams = [];
+        
         foreach ($data as $key => $value) {
-            $placeholder = 'update_' . $key;
-            $fields[] = "{$key} = :{$placeholder}";
-            $updateParams[$placeholder] = $value;
+            $fields[] = "{$key} = ?";
+            $updateParams[] = $value;
         }
         $fields = implode(',', $fields);
         

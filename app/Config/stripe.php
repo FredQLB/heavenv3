@@ -6,8 +6,8 @@ return [
     
     // Clés API pour sandbox/test
     'sandbox' => [
-        'publishable_key' => 'pk_test_your_publishable_key_here',
-        'secret_key' => 'sk_test_your_secret_key_here',
+        'publishable_key' => 'pk_test_51RWeYQ4PxvKMh4jgw84V5kWSNHxv78ixUDaIrM3Yl4aDFM9VhuxZL13LEP0fDYe3kSqj0kqY3owp7Xfwoye5YoZI00hsBS1Xx0',
+        'secret_key' => 'sk_test_51RWeYQ4PxvKMh4jgcFWy3o8OkaHF63Az979XzEHN88QoJmC3jhCle8OocKC6xNHaqPdwwZipgYSgcNLsblpvt7o200zQpQMTVe',
         'webhook_secret' => 'whsec_your_webhook_secret_here',
     ],
     
