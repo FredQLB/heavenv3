@@ -6,17 +6,9 @@ use App\Helpers\Database;
 use App\Helpers\Session;
 use App\Helpers\Logger;
 use App\Helpers\Pagination;
-use App\Services\ClientService;
 
 class ClientController
 {
-    private $clientService;
-
-    public function __construct()
-    {
-        $this->clientService = new ClientService();
-    }
-
     public function index()
     {
         try {
@@ -97,47 +89,63 @@ class ClientController
             $totalItems = $totalResult['total'] ?? 0;
             $totalPages = ceil($totalItems / $perPage);
 
-            // Créer un objet pagination simple
-            $pagination = (object)[
-                'current_page' => $page,
-                'per_page' => $perPage,
-                'total_items' => $totalItems,
-                'total_pages' => $totalPages,
-                'has_previous' => $page > 1,
-                'has_next' => $page < $totalPages,
-                'previous_page' => $page > 1 ? $page - 1 : null,
-                'next_page' => $page < $totalPages ? $page + 1 : null,
-                'first_item' => $totalItems > 0 ? (($page - 1) * $perPage) + 1 : 0,
-                'last_item' => min($page * $perPage, $totalItems)
-            ];
+            // Créer une classe pagination personnalisée
+            $pagination = new class($page, $perPage, $totalItems, $totalPages) {
+                public $current_page;
+                public $per_page;
+                public $total_items;
+                public $total_pages;
+                public $has_previous;
+                public $has_next;
+                public $previous_page;
+                public $next_page;
+                public $first_item;
+                public $last_item;
 
-            // Ajouter méthodes pour compatibilité avec la vue
-            $pagination->getTotalPages = function() use ($totalPages) { return $totalPages; };
-            $pagination->toArray = function() use ($pagination) {
-                return [
-                    'current_page' => $pagination->current_page,
-                    'per_page' => $pagination->per_page,
-                    'total_items' => $pagination->total_items,
-                    'total_pages' => $pagination->total_pages,
-                    'first_item' => $pagination->first_item,
-                    'last_item' => $pagination->last_item,
-                    'has_previous' => $pagination->has_previous,
-                    'has_next' => $pagination->has_next,
-                    'previous_page' => $pagination->previous_page,
-                    'next_page' => $pagination->next_page,
-                    'page_range' => range(max(1, $pagination->current_page - 2), min($pagination->total_pages, $pagination->current_page + 2))
-                ];
-            };
-            $pagination->getPageUrl = function($page) {
-                $params = $_GET;
-                if ($page === 1) {
-                    unset($params['page']);
-                } else {
-                    $params['page'] = $page;
+                public function __construct($page, $perPage, $totalItems, $totalPages) {
+                    $this->current_page = $page;
+                    $this->per_page = $perPage;
+                    $this->total_items = $totalItems;
+                    $this->total_pages = $totalPages;
+                    $this->has_previous = $page > 1;
+                    $this->has_next = $page < $totalPages;
+                    $this->previous_page = $page > 1 ? $page - 1 : null;
+                    $this->next_page = $page < $totalPages ? $page + 1 : null;
+                    $this->first_item = $totalItems > 0 ? (($page - 1) * $perPage) + 1 : 0;
+                    $this->last_item = min($page * $perPage, $totalItems);
                 }
-                $queryString = http_build_query($params);
-                $baseUrl = strtok($_SERVER['REQUEST_URI'], '?');
-                return $baseUrl . ($queryString ? '?' . $queryString : '');
+
+                public function getTotalPages() {
+                    return $this->total_pages;
+                }
+
+                public function toArray() {
+                    return [
+                        'current_page' => $this->current_page,
+                        'per_page' => $this->per_page,
+                        'total_items' => $this->total_items,
+                        'total_pages' => $this->total_pages,
+                        'first_item' => $this->first_item,
+                        'last_item' => $this->last_item,
+                        'has_previous' => $this->has_previous,
+                        'has_next' => $this->has_next,
+                        'previous_page' => $this->previous_page,
+                        'next_page' => $this->next_page,
+                        'page_range' => range(max(1, $this->current_page - 2), min($this->total_pages, $this->current_page + 2))
+                    ];
+                }
+
+                public function getPageUrl($page) {
+                    $params = $_GET;
+                    if ($page === 1) {
+                        unset($params['page']);
+                    } else {
+                        $params['page'] = $page;
+                    }
+                    $queryString = http_build_query($params);
+                    $baseUrl = strtok($_SERVER['REQUEST_URI'], '?');
+                    return $baseUrl . ($queryString ? '?' . $queryString : '');
+                }
             };
 
             // Statistiques
@@ -233,6 +241,8 @@ class ClientController
         }
 
         try {
+            Database::beginTransaction();
+
             // Préparer les données client
             $clientData = [
                 'raison_sociale' => trim($_POST['raison_sociale']),
@@ -242,48 +252,52 @@ class ClientController
                 'pays' => trim($_POST['pays']),
                 'email_facturation' => trim($_POST['email_facturation']),
                 'numero_tva' => !empty($_POST['numero_tva']) ? trim($_POST['numero_tva']) : null,
-                'actif' => 1
+                'actif' => 1,
+                'date_creation' => date('Y-m-d H:i:s')
             ];
 
-            // Options de création
-            $options = [
-                'create_admin_user' => isset($_POST['create_admin_user']) && $_POST['create_admin_user'] === '1',
-                'send_welcome_email' => isset($_POST['send_welcome_email']) && $_POST['send_welcome_email'] === '1'
-            ];
+            // Créer le client
+            $clientId = Database::insert('clients', $clientData);
 
-            // Utiliser le service pour créer le client complet
-            $result = $this->clientService->createCompleteClient($clientData, $options);
+            // Créer le client sur Stripe
+            try {
+                $stripeCustomer = \App\Services\StripeService::createCustomer($clientData);
+                Database::update('clients', 
+                    ['stripe_customer_id' => $stripeCustomer->id], 
+                    'id = ?', 
+                    [$clientId]
+                );
+                
+                Logger::info('Client Stripe créé', [
+                    'client_id' => $clientId,
+                    'stripe_customer_id' => $stripeCustomer->id
+                ]);
+            } catch (\Exception $e) {
+                Logger::warning('Échec création client Stripe', [
+                    'client_id' => $clientId,
+                    'error' => $e->getMessage()
+                ]);
+                // Ne pas faire échouer la création du client
+            }
 
-            Logger::info('Nouveau client créé avec succès', [
-                'client_id' => $result['client_id'],
-                'raison_sociale' => $clientData['raison_sociale'],
-                'has_stripe' => !empty($result['stripe_customer']),
-                'has_admin_user' => !empty($result['admin_user']),
-                'options' => $options
+            Database::commit();
+
+            Logger::info('Nouveau client créé', [
+                'client_id' => $clientId,
+                'raison_sociale' => $clientData['raison_sociale']
             ]);
 
             Session::setFlash('success', 'Client créé avec succès');
-            
-            // Ajouter des messages informatifs selon les options
-            if ($options['create_admin_user']) {
-                Session::setFlash('info', 'Un utilisateur administrateur a été créé et les identifiants ont été envoyés par email');
-            }
-            
-            if ($options['send_welcome_email']) {
-                Session::setFlash('info', 'Un email de bienvenue a été envoyé au client');
-            }
-
-            header('Location: /clients/' . $result['client_id']);
+            header('Location: /clients/' . $clientId);
             exit;
 
         } catch (\Exception $e) {
+            Database::rollback();
             Logger::error("Erreur lors de la création du client", [
                 'error' => $e->getMessage(),
-                'data' => array_merge($_POST, ['mot_de_passe' => '***']), // Masquer les mots de passe dans les logs
-                'trace' => $e->getTraceAsString()
+                'data' => $_POST
             ]);
-            
-            Session::setFlash('error', 'Erreur lors de la création du client : ' . $e->getMessage());
+            Session::setFlash('error', 'Erreur lors de la création du client');
             header('Location: /clients/create');
             exit;
         }
@@ -351,17 +365,19 @@ class ClientController
                 LIMIT 10
             ", [$id]);
 
-            // Statistiques du client via le service
-            $client_stats_data = $this->clientService->getClientStats($id);
+            // Statistiques du client
             $client_stats = [
-                'total_users' => $client_stats_data['users']['total'] ?? 0,
-                'active_users' => $client_stats_data['users']['active'] ?? 0,
-                'total_subscriptions' => $client_stats_data['subscriptions']['total'] ?? 0,
-                'active_subscriptions' => $client_stats_data['subscriptions']['active'] ?? 0,
-                'total_materials' => $client_stats_data['materials']['total'] ?? 0,
-                'active_materials' => $client_stats_data['materials']['active_rentals'] ?? 0,
-                'total_categories' => $client_stats_data['categories']['total'] ?? 0,
-                'revenue_mensuel' => $client_stats_data['subscriptions']['monthly_revenue'] ?? 0
+                'total_users' => count($users),
+                'active_users' => count(array_filter($users, fn($u) => $u['actif'])),
+                'total_subscriptions' => count($subscriptions),
+                'active_subscriptions' => count(array_filter($subscriptions, fn($s) => $s['statut'] === 'actif')),
+                'total_materials' => count($materials),
+                'active_materials' => count(array_filter($materials, fn($m) => $m['statut'] === 'loue')),
+                'total_categories' => count($categories),
+                'revenue_mensuel' => array_sum(array_column(
+                    array_filter($subscriptions, fn($s) => $s['statut'] === 'actif'),
+                    'prix_total_mensuel'
+                ))
             ];
 
             // Définir les variables globales
@@ -610,31 +626,6 @@ class ClientController
         }
 
         header('Location: /clients');
-        exit;
-    }
-
-    /**
-     * Action pour tester l'envoi d'email pour un client
-     */
-    public function testEmail($id)
-    {
-        try {
-            $emailType = $_GET['type'] ?? 'test';
-            
-            $this->clientService->testClientEmail($id, $emailType);
-            
-            Session::setFlash('success', 'Email de test envoyé avec succès');
-            
-        } catch (\Exception $e) {
-            Logger::error("Erreur lors de l'envoi de l'email de test", [
-                'client_id' => $id,
-                'email_type' => $emailType ?? 'unknown',
-                'error' => $e->getMessage()
-            ]);
-            Session::setFlash('error', 'Erreur lors de l\'envoi de l\'email : ' . $e->getMessage());
-        }
-
-        header('Location: /clients/' . $id);
         exit;
     }
 
