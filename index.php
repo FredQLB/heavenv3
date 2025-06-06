@@ -163,6 +163,56 @@ $router->get('/export/users', 'ExportController@users', ['auth']);
 $router->get('/export/subscriptions', 'ExportController@subscriptions', ['auth']);
 $router->get('/export/invoices', 'ExportController@invoices', ['auth']);
 
+// Test d'envoi d'email pour un client
+$router->get('/clients/{id}/test-email', 'ClientController@testEmail', ['auth']);
+
+// Test de configuration email général
+$router->get('/admin/test-email', function() {
+    try {
+        \App\Services\EmailService::testEmailConfiguration();
+        \App\Helpers\Session::setFlash('success', 'Test email envoyé avec succès');
+    } catch (\Exception $e) {
+        \App\Helpers\Logger::error('Erreur test email', ['error' => $e->getMessage()]);
+        \App\Helpers\Session::setFlash('error', 'Erreur lors du test email : ' . $e->getMessage());
+    }
+    header('Location: /settings');
+    exit;
+}, ['auth']);
+
+// Envoi manuel des notifications d'expiration
+$router->post('/admin/send-expiration-notifications', function() {
+    try {
+        $clientService = new \App\Services\ClientService();
+        $result = $clientService->sendSubscriptionExpirationNotifications();
+        
+        \App\Helpers\Session::setFlash('success', 
+            "Notifications envoyées : {$result['emails_sent']} sur {$result['total_subscriptions']} abonnements");
+    } catch (\Exception $e) {
+        \App\Helpers\Logger::error('Erreur notifications expiration', ['error' => $e->getMessage()]);
+        \App\Helpers\Session::setFlash('error', 'Erreur : ' . $e->getMessage());
+    }
+    header('Location: /subscriptions');
+    exit;
+}, ['auth']);
+
+// Envoi manuel des notifications de factures
+$router->post('/admin/send-invoice-notifications', function() {
+    try {
+        $clientService = new \App\Services\ClientService();
+        $result = $clientService->sendInvoiceNotifications();
+        
+        \App\Helpers\Session::setFlash('success', 
+            "Notifications envoyées : {$result['emails_sent']} sur {$result['total_invoices']} factures");
+    } catch (\Exception $e) {
+        \App\Helpers\Logger::error('Erreur notifications factures', ['error' => $e->getMessage()]);
+        \App\Helpers\Session::setFlash('error', 'Erreur : ' . $e->getMessage());
+    }
+    header('Location: /invoices');
+    exit;
+}, ['auth']);
+
+
+
 // Routes d'erreur
 $router->get('/error/403', function() {
     http_response_code(403);

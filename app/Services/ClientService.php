@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Helpers\Database;
 use App\Helpers\Logger;
 use App\Models\Client;
+use App\Services\EmailService;
 
 class ClientService
 {
@@ -49,8 +50,9 @@ class ClientService
             }
 
             // 3. Créer un utilisateur administrateur si demandé
+            $adminUser = null;
             if ($options['create_admin_user'] ?? false) {
-                $adminUser = $this->createAdminUser($clientId, $clientData['email_facturation']);
+                $adminUser = $this->createAdminUser($clientId, $clientData);
                 Logger::info('Utilisateur admin créé', [
                     'client_id' => $clientId,
                     'user_id' => $adminUser['id']
@@ -59,7 +61,19 @@ class ClientService
 
             // 4. Envoyer l'email de bienvenue si demandé
             if ($options['send_welcome_email'] ?? false) {
-                $this->sendWelcomeEmail($clientId, $clientData);
+                try {
+                    EmailService::sendWelcomeEmail($clientData);
+                    Logger::info('Email de bienvenue envoyé', [
+                        'client_id' => $clientId,
+                        'email' => $clientData['email_facturation']
+                    ]);
+                } catch (\Exception $e) {
+                    Logger::warning('Échec envoi email de bienvenue', [
+                        'client_id' => $clientId,
+                        'error' => $e->getMessage()
+                    ]);
+                    // Ne pas faire échouer la création pour un problème d'email
+                }
             }
 
             Database::commit();
@@ -67,7 +81,7 @@ class ClientService
             return [
                 'client_id' => $clientId,
                 'stripe_customer' => $stripeCustomer,
-                'admin_user' => $adminUser ?? null
+                'admin_user' => $adminUser
             ];
 
         } catch (\Exception $e) {
@@ -84,15 +98,21 @@ class ClientService
     /**
      * Créer un utilisateur administrateur pour le client
      */
-    private function createAdminUser($clientId, $email)
+    private function createAdminUser($clientId, $clientData)
     {
         $password = $this->generateSecurePassword();
+        $client = $this->clientModel->findById($clientId);
+        
+        // Extraire le nom de l'entreprise pour créer le nom d'utilisateur
+        $companyWords = explode(' ', $client['raison_sociale']);
+        $firstName = 'Admin';
+        $lastName = count($companyWords) > 1 ? $companyWords[0] : $client['raison_sociale'];
         
         $userData = [
             'client_id' => $clientId,
-            'nom' => 'Administrateur',
-            'prenom' => 'Principal',
-            'email' => $email,
+            'nom' => $lastName,
+            'prenom' => $firstName,
+            'email' => $clientData['email_facturation'],
             'telephone' => null,
             'mot_de_passe' => md5($password),
             'identifiant_appareil' => null,
@@ -105,11 +125,20 @@ class ClientService
 
         // Envoyer les identifiants par email
         try {
-            $this->sendCredentialsEmail($email, $password);
+            EmailService::sendCredentialsEmail(
+                $clientData['email_facturation'], 
+                $password, 
+                $firstName . ' ' . $lastName,
+                true
+            );
+            Logger::info('Email identifiants envoyé', [
+                'user_id' => $userId,
+                'email' => $clientData['email_facturation']
+            ]);
         } catch (\Exception $e) {
             Logger::warning('Échec envoi email identifiants', [
                 'user_id' => $userId,
-                'email' => $email,
+                'email' => $clientData['email_facturation'],
                 'error' => $e->getMessage()
             ]);
         }
@@ -191,6 +220,143 @@ class ClientService
         ", [$clientId]);
 
         return $stats;
+    }
+
+    /**
+     * Envoyer des notifications d'expiration d'abonnements
+     */
+    public function sendSubscriptionExpirationNotifications()
+    {
+        try {
+            // Récupérer les abonnements expirant dans 30, 15, 7 et 3 jours
+            $expiringSubscriptions = Database::fetchAll("
+                SELECT ac.*, c.raison_sociale, c.email_facturation, fa.nom as formule_nom,
+                       DATEDIFF(ac.date_fin, NOW()) as days_left
+                FROM abonnements_clients ac
+                JOIN clients c ON ac.client_id = c.id
+                JOIN formules_abonnement fa ON ac.formule_id = fa.id
+                WHERE ac.statut = 'actif' 
+                AND ac.date_fin IS NOT NULL
+                AND ac.date_fin BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL 30 DAY)
+                AND DATEDIFF(ac.date_fin, NOW()) IN (30, 15, 7, 3, 1)
+                ORDER BY ac.date_fin ASC
+            ");
+
+            $emailsSent = 0;
+
+            foreach ($expiringSubscriptions as $subscription) {
+                try {
+                    $clientData = [
+                        'raison_sociale' => $subscription['raison_sociale'],
+                        'email_facturation' => $subscription['email_facturation']
+                    ];
+
+                    EmailService::sendSubscriptionExpiringNotification(
+                        $clientData, 
+                        $subscription, 
+                        $subscription['days_left']
+                    );
+
+                    $emailsSent++;
+
+                    Logger::info('Notification expiration envoyée', [
+                        'subscription_id' => $subscription['id'],
+                        'client_email' => $subscription['email_facturation'],
+                        'days_left' => $subscription['days_left']
+                    ]);
+
+                } catch (\Exception $e) {
+                    Logger::error('Erreur envoi notification expiration', [
+                        'subscription_id' => $subscription['id'],
+                        'error' => $e->getMessage()
+                    ]);
+                }
+            }
+
+            Logger::info('Notifications d\'expiration traitées', [
+                'total_subscriptions' => count($expiringSubscriptions),
+                'emails_sent' => $emailsSent
+            ]);
+
+            return [
+                'total_subscriptions' => count($expiringSubscriptions),
+                'emails_sent' => $emailsSent
+            ];
+
+        } catch (\Exception $e) {
+            Logger::error('Erreur traitement notifications expiration', [
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Envoyer les notifications de nouvelles factures
+     */
+    public function sendInvoiceNotifications()
+    {
+        try {
+            // Récupérer les factures créées dans les dernières 24h qui n'ont pas encore été notifiées
+            $newInvoices = Database::fetchAll("
+                SELECT fs.*, c.raison_sociale, c.email_facturation
+                FROM factures_stripe fs
+                JOIN clients c ON fs.client_id = c.id
+                WHERE fs.date_creation >= DATE_SUB(NOW(), INTERVAL 1 DAY)
+                AND (fs.notification_envoyee IS NULL OR fs.notification_envoyee = 0)
+                ORDER BY fs.date_creation DESC
+            ");
+
+            $emailsSent = 0;
+
+            foreach ($newInvoices as $invoice) {
+                try {
+                    $clientData = [
+                        'raison_sociale' => $invoice['raison_sociale'],
+                        'email_facturation' => $invoice['email_facturation']
+                    ];
+
+                    EmailService::sendInvoiceNotification($clientData, $invoice);
+
+                    // Marquer la facture comme notifiée
+                    Database::update('factures_stripe', 
+                        ['notification_envoyee' => 1], 
+                        'id = ?', 
+                        [$invoice['id']]
+                    );
+
+                    $emailsSent++;
+
+                    Logger::info('Notification facture envoyée', [
+                        'invoice_id' => $invoice['id'],
+                        'client_email' => $invoice['email_facturation'],
+                        'amount' => $invoice['montant']
+                    ]);
+
+                } catch (\Exception $e) {
+                    Logger::error('Erreur envoi notification facture', [
+                        'invoice_id' => $invoice['id'],
+                        'error' => $e->getMessage()
+                    ]);
+                }
+            }
+
+            Logger::info('Notifications de factures traitées', [
+                'total_invoices' => count($newInvoices),
+                'emails_sent' => $emailsSent
+            ]);
+
+            return [
+                'total_invoices' => count($newInvoices),
+                'emails_sent' => $emailsSent
+            ];
+
+        } catch (\Exception $e) {
+            Logger::error('Erreur traitement notifications factures', [
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
     }
 
     /**
@@ -351,63 +517,60 @@ class ClientService
     }
 
     /**
-     * Générer un rapport d'activité client
+     * Tester l'envoi d'email pour un client
      */
-    public function generateClientReport($clientId)
+    public function testClientEmail($clientId, $type = 'welcome')
     {
         $client = $this->clientModel->findById($clientId);
         if (!$client) {
             throw new \Exception('Client non trouvé');
         }
 
-        $stats = $this->getClientStats($clientId);
-        $activity = $this->analyzeClientActivity($clientId);
-        $nextPayment = $this->getNextPaymentEstimate($clientId);
-        $userLimits = $this->checkUserLimits($clientId);
+        try {
+            switch ($type) {
+                case 'welcome':
+                    EmailService::sendWelcomeEmail($client);
+                    break;
+                
+                case 'credentials':
+                    $testPassword = 'TestPassword123!';
+                    EmailService::sendCredentialsEmail(
+                        $client['email_facturation'], 
+                        $testPassword, 
+                        'Test Admin',
+                        true
+                    );
+                    break;
+                
+                case 'test':
+                    EmailService::sendEmail(
+                        $client['email_facturation'],
+                        'Test Email Cover AR',
+                        '<h1>Test Email</h1><p>Ceci est un email de test depuis Cover AR Admin.</p>',
+                        'Test Email - Ceci est un email de test depuis Cover AR Admin.'
+                    );
+                    break;
+                
+                default:
+                    throw new \Exception('Type d\'email non supporté');
+            }
 
-        // Alertes et recommandations
-        $alerts = [];
-        $recommendations = [];
+            Logger::info('Email de test envoyé', [
+                'client_id' => $clientId,
+                'email_type' => $type,
+                'recipient' => $client['email_facturation']
+            ]);
 
-        // Vérifier les limites d'utilisateurs
-        if ($userLimits['over_limit']) {
-            $alerts[] = [
-                'type' => 'warning',
-                'message' => "Dépassement de {$userLimits['current'] - $userLimits['limit']} utilisateur(s) autorisé(s)"
-            ];
-            $recommendations[] = 'Mettre à niveau l\'abonnement ou facturer les utilisateurs supplémentaires';
+            return true;
+
+        } catch (\Exception $e) {
+            Logger::error('Erreur envoi email de test', [
+                'client_id' => $clientId,
+                'email_type' => $type,
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
         }
-
-        // Vérifier l'activité des utilisateurs
-        $inactiveUsers = count(array_filter($activity['user_activity'], fn($u) => $u['connections_count'] === 0));
-        if ($inactiveUsers > 0) {
-            $alerts[] = [
-                'type' => 'info',
-                'message' => "{$inactiveUsers} utilisateur(s) n'ont pas utilisé l'application récemment"
-            ];
-            $recommendations[] = 'Contacter les utilisateurs inactifs pour formation ou support';
-        }
-
-        // Vérifier les factures en retard
-        $overdueInvoices = $stats['invoices']['overdue'] ?? 0;
-        if ($overdueInvoices > 0) {
-            $alerts[] = [
-                'type' => 'error',
-                'message' => "{$overdueInvoices} facture(s) en retard de paiement"
-            ];
-            $recommendations[] = 'Relancer le client pour les factures impayées';
-        }
-
-        return [
-            'client' => $client,
-            'stats' => $stats,
-            'activity' => $activity,
-            'next_payment' => $nextPayment,
-            'user_limits' => $userLimits,
-            'alerts' => $alerts,
-            'recommendations' => $recommendations,
-            'generated_at' => date('Y-m-d H:i:s')
-        ];
     }
 
     /**
@@ -446,19 +609,15 @@ class ClientService
                 WHERE client_id = ?
             ", [$targetClientId, $sourceClientId]);
 
-            // Transférer les catégories
+            // Transférer les catégories (éviter les doublons)
             Database::query("
-                UPDATE client_sous_categories 
-                SET client_id = ? 
-                WHERE client_id = ? 
-                AND sous_categorie_id NOT IN (
-                    SELECT sous_categorie_id 
-                    FROM client_sous_categories 
-                    WHERE client_id = ?
-                )
-            ", [$targetClientId, $sourceClientId, $targetClientId]);
+                INSERT IGNORE INTO client_sous_categories (client_id, sous_categorie_id, date_ajout)
+                SELECT ?, sous_categorie_id, date_ajout
+                FROM client_sous_categories 
+                WHERE client_id = ?
+            ", [$targetClientId, $sourceClientId]);
 
-            // Supprimer les doublons de catégories
+            // Supprimer les anciennes associations de catégories
             Database::query("
                 DELETE FROM client_sous_categories 
                 WHERE client_id = ?
@@ -600,88 +759,6 @@ class ClientService
     }
 
     /**
-     * Envoyer l'email de bienvenue
-     */
-    private function sendWelcomeEmail($clientId, $clientData)
-    {
-        try {
-            // TODO: Implémenter l'envoi d'email avec le service email
-            Logger::info('Email de bienvenue envoyé', [
-                'client_id' => $clientId,
-                'email' => $clientData['email_facturation']
-            ]);
-        } catch (\Exception $e) {
-            Logger::warning('Échec envoi email de bienvenue', [
-                'client_id' => $clientId,
-                'error' => $e->getMessage()
-            ]);
-        }
-    }
-
-    /**
-     * Envoyer les identifiants par email
-     */
-    private function sendCredentialsEmail($email, $password)
-    {
-        try {
-            // TODO: Implémenter l'envoi d'email avec les identifiants
-            Logger::info('Email identifiants envoyé', [
-                'email' => $email
-            ]);
-        } catch (\Exception $e) {
-            Logger::warning('Échec envoi email identifiants', [
-                'email' => $email,
-                'error' => $e->getMessage()
-            ]);
-        }
-    }
-
-    /**
-     * Nettoyer les données d'un client inactif
-     */
-    public function cleanupInactiveClient($clientId)
-    {
-        $client = $this->clientModel->findById($clientId);
-        if (!$client || $client['actif']) {
-            throw new \Exception('Client non trouvé ou toujours actif');
-        }
-
-        try {
-            Database::beginTransaction();
-
-            // Supprimer les associations catégories
-            Database::delete('client_sous_categories', 'client_id = ?', [$clientId]);
-
-            // Marquer les utilisateurs comme supprimés (garder pour l'historique)
-            Database::query("
-                UPDATE utilisateurs 
-                SET actif = 0, email = CONCAT(email, '_deleted_', UNIX_TIMESTAMP())
-                WHERE client_id = ? AND type_utilisateur != 'MegaAdmin'
-            ", [$clientId]);
-
-            // Archiver les abonnements annulés
-            Database::query("
-                UPDATE abonnements_clients 
-                SET statut = 'archive' 
-                WHERE client_id = ? AND statut = 'annule'
-            ", [$clientId]);
-
-            Database::commit();
-
-            Logger::info('Données client nettoyées', [
-                'client_id' => $clientId,
-                'client_name' => $client['raison_sociale']
-            ]);
-
-            return true;
-
-        } catch (\Exception $e) {
-            Database::rollback();
-            throw $e;
-        }
-    }
-
-    /**
      * Rechercher des clients avec filtres avancés
      */
     public function searchClients($filters = [], $pagination = [])
@@ -771,4 +848,3 @@ class ClientService
         return Database::fetchAll($query, $params);
     }
 }
-?>

@@ -6,9 +6,17 @@ use App\Helpers\Database;
 use App\Helpers\Session;
 use App\Helpers\Logger;
 use App\Helpers\Pagination;
+use App\Services\ClientService;
 
 class ClientController
 {
+    private $clientService;
+
+    public function __construct()
+    {
+        $this->clientService = new ClientService();
+    }
+
     public function index()
     {
         try {
@@ -225,8 +233,6 @@ class ClientController
         }
 
         try {
-            Database::beginTransaction();
-
             // Préparer les données client
             $clientData = [
                 'raison_sociale' => trim($_POST['raison_sociale']),
@@ -236,52 +242,48 @@ class ClientController
                 'pays' => trim($_POST['pays']),
                 'email_facturation' => trim($_POST['email_facturation']),
                 'numero_tva' => !empty($_POST['numero_tva']) ? trim($_POST['numero_tva']) : null,
-                'actif' => 1,
-                'date_creation' => date('Y-m-d H:i:s')
+                'actif' => 1
             ];
 
-            // Créer le client
-            $clientId = Database::insert('clients', $clientData);
+            // Options de création
+            $options = [
+                'create_admin_user' => isset($_POST['create_admin_user']) && $_POST['create_admin_user'] === '1',
+                'send_welcome_email' => isset($_POST['send_welcome_email']) && $_POST['send_welcome_email'] === '1'
+            ];
 
-            // Créer le client sur Stripe
-            try {
-                $stripeCustomer = \App\Services\StripeService::createCustomer($clientData);
-                Database::update('clients', 
-                    ['stripe_customer_id' => $stripeCustomer->id], 
-                    'id = ?', 
-                    [$clientId]
-                );
-                
-                Logger::info('Client Stripe créé', [
-                    'client_id' => $clientId,
-                    'stripe_customer_id' => $stripeCustomer->id
-                ]);
-            } catch (\Exception $e) {
-                Logger::warning('Échec création client Stripe', [
-                    'client_id' => $clientId,
-                    'error' => $e->getMessage()
-                ]);
-                // Ne pas faire échouer la création du client
-            }
+            // Utiliser le service pour créer le client complet
+            $result = $this->clientService->createCompleteClient($clientData, $options);
 
-            Database::commit();
-
-            Logger::info('Nouveau client créé', [
-                'client_id' => $clientId,
-                'raison_sociale' => $clientData['raison_sociale']
+            Logger::info('Nouveau client créé avec succès', [
+                'client_id' => $result['client_id'],
+                'raison_sociale' => $clientData['raison_sociale'],
+                'has_stripe' => !empty($result['stripe_customer']),
+                'has_admin_user' => !empty($result['admin_user']),
+                'options' => $options
             ]);
 
             Session::setFlash('success', 'Client créé avec succès');
-            header('Location: /clients/' . $clientId);
+            
+            // Ajouter des messages informatifs selon les options
+            if ($options['create_admin_user']) {
+                Session::setFlash('info', 'Un utilisateur administrateur a été créé et les identifiants ont été envoyés par email');
+            }
+            
+            if ($options['send_welcome_email']) {
+                Session::setFlash('info', 'Un email de bienvenue a été envoyé au client');
+            }
+
+            header('Location: /clients/' . $result['client_id']);
             exit;
 
         } catch (\Exception $e) {
-            Database::rollback();
             Logger::error("Erreur lors de la création du client", [
                 'error' => $e->getMessage(),
-                'data' => $_POST
+                'data' => array_merge($_POST, ['mot_de_passe' => '***']), // Masquer les mots de passe dans les logs
+                'trace' => $e->getTraceAsString()
             ]);
-            Session::setFlash('error', 'Erreur lors de la création du client');
+            
+            Session::setFlash('error', 'Erreur lors de la création du client : ' . $e->getMessage());
             header('Location: /clients/create');
             exit;
         }
@@ -349,19 +351,17 @@ class ClientController
                 LIMIT 10
             ", [$id]);
 
-            // Statistiques du client
+            // Statistiques du client via le service
+            $client_stats_data = $this->clientService->getClientStats($id);
             $client_stats = [
-                'total_users' => count($users),
-                'active_users' => count(array_filter($users, fn($u) => $u['actif'])),
-                'total_subscriptions' => count($subscriptions),
-                'active_subscriptions' => count(array_filter($subscriptions, fn($s) => $s['statut'] === 'actif')),
-                'total_materials' => count($materials),
-                'active_materials' => count(array_filter($materials, fn($m) => $m['statut'] === 'loue')),
-                'total_categories' => count($categories),
-                'revenue_mensuel' => array_sum(array_column(
-                    array_filter($subscriptions, fn($s) => $s['statut'] === 'actif'),
-                    'prix_total_mensuel'
-                ))
+                'total_users' => $client_stats_data['users']['total'] ?? 0,
+                'active_users' => $client_stats_data['users']['active'] ?? 0,
+                'total_subscriptions' => $client_stats_data['subscriptions']['total'] ?? 0,
+                'active_subscriptions' => $client_stats_data['subscriptions']['active'] ?? 0,
+                'total_materials' => $client_stats_data['materials']['total'] ?? 0,
+                'active_materials' => $client_stats_data['materials']['active_rentals'] ?? 0,
+                'total_categories' => $client_stats_data['categories']['total'] ?? 0,
+                'revenue_mensuel' => $client_stats_data['subscriptions']['monthly_revenue'] ?? 0
             ];
 
             // Définir les variables globales
@@ -610,6 +610,31 @@ class ClientController
         }
 
         header('Location: /clients');
+        exit;
+    }
+
+    /**
+     * Action pour tester l'envoi d'email pour un client
+     */
+    public function testEmail($id)
+    {
+        try {
+            $emailType = $_GET['type'] ?? 'test';
+            
+            $this->clientService->testClientEmail($id, $emailType);
+            
+            Session::setFlash('success', 'Email de test envoyé avec succès');
+            
+        } catch (\Exception $e) {
+            Logger::error("Erreur lors de l'envoi de l'email de test", [
+                'client_id' => $id,
+                'email_type' => $emailType ?? 'unknown',
+                'error' => $e->getMessage()
+            ]);
+            Session::setFlash('error', 'Erreur lors de l\'envoi de l\'email : ' . $e->getMessage());
+        }
+
+        header('Location: /clients/' . $id);
         exit;
     }
 

@@ -8,11 +8,11 @@ return [
     'mailers' => [
         'smtp' => [
             'transport' => 'smtp',
-            'host' => 'smtp.gmail.com',
-            'port' => 587,
+            'host' => 'cover-ar.com',
+            'port' => 465,
             'encryption' => 'tls', // tls, ssl, null
-            'username' => 'your-email@gmail.com',
-            'password' => 'your-app-password',
+            'username' => 'no-reply@cover-ar.com', // Votre email Gmail
+            'password' => 'TestEmail2025', // À remplacer par votre mot de passe d'application
             'timeout' => 30,
             'auth_mode' => null,
         ],
@@ -30,18 +30,18 @@ return [
         // Configuration pour la production
         'production' => [
             'transport' => 'smtp',
-            'host' => 'smtp.your-domain.com',
-            'port' => 587,
+            'host' => 'cover-ar.com',
+            'port' => 465,
             'encryption' => 'tls',
-            'username' => 'noreply@cover-ar.com',
-            'password' => 'your-production-password',
+            'username' => 'no-reply@cover-ar.com',
+            'password' => 'TestEmail2025',
             'timeout' => 30,
         ]
     ],
     
     // Configuration globale
     'from' => [
-        'address' => 'noreply@cover-ar.com',
+        'address' => 'no-reply@cover-ar.com',
         'name' => 'Cover AR',
     ],
     
@@ -86,4 +86,3 @@ return [
     // Configuration des logs
     'log_channel' => 'mail',
 ];
-?>
