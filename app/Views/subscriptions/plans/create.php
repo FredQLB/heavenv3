@@ -4,6 +4,8 @@ require_once 'app/Views/layouts/main.php';
 
 function renderContent() {
     global $materials;
+
+    print_r($materials);
 ?>
 
 <div class="subscription-plan-create">

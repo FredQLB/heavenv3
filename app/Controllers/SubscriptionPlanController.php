@@ -103,16 +103,39 @@ class SubscriptionPlanController
 
     public function create()
     {
-        // Récupérer les modèles de matériel pour le formulaire
-        $materials = Database::query("
-            SELECT id, nom, description, prix_mensuel, depot_garantie 
-            FROM modeles_materiel 
-            WHERE actif = 1 
-            ORDER BY nom
-        ")->fetchAll();
+        $this->showMaterialsCreate();
+    }
 
-        $pageTitle = 'Créer une formule d\'abonnement';
-        require_once 'app/Views/subscriptions/plans/create.php';
+    private function showMaterialsCreate() {
+        try {
+            // Récupérer toutes les formules avec les informations du matériel
+            $materials = Database::query("
+                SELECT id, nom, description, prix_mensuel, depot_garantie 
+                FROM modeles_materiel 
+                WHERE actif = 1 
+                ORDER BY nom
+            ")->fetchAll();
+
+
+            // Charger la vue avec les données
+            $this->loadView('subscriptions/plans/create', [
+                'materials' => $materials,
+                'pageTitle' => 'Créer une formule d\'abonnement'
+            ]);
+
+        } catch (\Exception $e) {
+            Logger::error("Erreur lors de la récupération du matériel", [
+                'error' => $e->getMessage()
+            ]);
+            
+            Session::setFlash('error', 'Erreur lors de la récupération du matériel');
+            
+            // Charger la vue avec des données vides
+            $this->loadView('subscriptions/plans/create', [
+                'materials' => [],
+                'pageTitle' => 'Créer une formule d\'abonnement'
+            ]);
+        }
     }
 
     public function store()

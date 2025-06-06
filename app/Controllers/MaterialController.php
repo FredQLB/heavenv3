@@ -5,17 +5,9 @@ namespace App\Controllers;
 use App\Helpers\Database;
 use App\Helpers\Session;
 use App\Helpers\Logger;
-use App\Models\MaterialModel;
 
 class MaterialController
 {
-    private $materialModel;
-
-    public function __construct()
-    {
-        $this->materialModel = new MaterialModel();
-    }
-
     public function index()
     {
         try {
@@ -27,16 +19,45 @@ class MaterialController
                 'price_max' => $_GET['price_max'] ?? ''
             ];
 
-            // Récupérer les matériels
-            if ($search || array_filter($filters)) {
-                $materials = $this->materialModel->search($search, $filters);
-            } else {
-                $materials = $this->materialModel->findAll(false); // Inclure les inactifs
+            // Construire la requête de base
+            $query = "SELECT * FROM modeles_materiel";
+            $params = [];
+            $whereConditions = [];
+
+            // Ajouter les filtres
+            if (!empty($search)) {
+                $whereConditions[] = "(nom LIKE ? OR description LIKE ?)";
+                $params[] = "%{$search}%";
+                $params[] = "%{$search}%";
             }
+
+            if ($filters['status'] !== '') {
+                $whereConditions[] = "actif = ?";
+                $params[] = (int)$filters['status'];
+            }
+
+            if (!empty($filters['price_min'])) {
+                $whereConditions[] = "prix_mensuel >= ?";
+                $params[] = (float)$filters['price_min'];
+            }
+
+            if (!empty($filters['price_max'])) {
+                $whereConditions[] = "prix_mensuel <= ?";
+                $params[] = (float)$filters['price_max'];
+            }
+
+            // Assembler la requête
+            if (!empty($whereConditions)) {
+                $query .= " WHERE " . implode(' AND ', $whereConditions);
+            }
+            $query .= " ORDER BY nom";
+
+            // Exécuter la requête
+            $materials = Database::fetchAll($query, $params);
 
             // Ajouter les statistiques d'usage pour chaque matériel
             foreach ($materials as &$material) {
-                $material['usage_stats'] = $this->materialModel->getUsageStats($material['id']);
+                $material['usage_stats'] = $this->getUsageStats($material['id']);
             }
 
             // Statistiques générales
@@ -51,27 +72,95 @@ class MaterialController
                 ")['revenue'] ?? 0
             ];
 
-            $pageTitle = 'Gestion du matériel';
+            // Définir les variables globales pour la vue
+            $GLOBALS['materials'] = $materials;
+            $GLOBALS['stats'] = $stats;
+            $GLOBALS['pageTitle'] = 'Gestion du matériel';
+
+            // Debug : Logger les données
+            Logger::info('MaterialController index - données chargées', [
+                'materials_count' => count($materials),
+                'stats' => $stats,
+                'search' => $search,
+                'filters' => $filters
+            ]);
+
+            // Charger la vue
             require_once 'app/Views/materials/index.php';
 
         } catch (\Exception $e) {
             Logger::error("Erreur lors de la récupération du matériel", [
-                'error' => $e->getMessage()
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
             ]);
+            
             Session::setFlash('error', 'Erreur lors du chargement du matériel');
             
             // Données par défaut en cas d'erreur
-            $materials = [];
-            $stats = [
+            $GLOBALS['materials'] = [];
+            $GLOBALS['stats'] = [
                 'total_materials' => 0,
                 'active_materials' => 0,
                 'rented_count' => 0,
                 'total_revenue' => 0
             ];
+            $GLOBALS['pageTitle'] = 'Gestion du matériel';
             
-            $pageTitle = 'Gestion du matériel';
             require_once 'app/Views/materials/index.php';
         }
+    }
+
+    private function getUsageStats($materialId)
+    {
+        $stats = [
+            'plans_count' => 0,
+            'active_rentals' => 0,
+            'total_rentals' => 0,
+            'revenue_generated' => 0
+        ];
+
+        try {
+            // Nombre de formules utilisant ce matériel
+            $plans = Database::fetch("
+                SELECT COUNT(*) as count 
+                FROM formules_abonnement 
+                WHERE modele_materiel_id = ? AND actif = 1
+            ", [$materialId]);
+            $stats['plans_count'] = $plans['count'] ?? 0;
+
+            // Locations actives
+            $activeRentals = Database::fetch("
+                SELECT COUNT(*) as count 
+                FROM materiel_loue 
+                WHERE modele_materiel_id = ? AND statut IN ('loue', 'maintenance')
+            ", [$materialId]);
+            $stats['active_rentals'] = $activeRentals['count'] ?? 0;
+
+            // Total des locations
+            $totalRentals = Database::fetch("
+                SELECT COUNT(*) as count 
+                FROM materiel_loue 
+                WHERE modele_materiel_id = ?
+            ", [$materialId]);
+            $stats['total_rentals'] = $totalRentals['count'] ?? 0;
+
+            // Revenus générés
+            $revenue = Database::fetch("
+                SELECT COALESCE(SUM(ac.prix_total_mensuel), 0) as revenue
+                FROM abonnements_clients ac
+                JOIN formules_abonnement fa ON ac.formule_id = fa.id
+                WHERE fa.modele_materiel_id = ? AND ac.statut = 'actif'
+            ", [$materialId]);
+            $stats['revenue_generated'] = $revenue['revenue'] ?? 0;
+
+        } catch (\Exception $e) {
+            Logger::error("Erreur lors du calcul des stats d'usage", [
+                'material_id' => $materialId,
+                'error' => $e->getMessage()
+            ]);
+        }
+
+        return $stats;
     }
 
     public function create()
@@ -95,7 +184,7 @@ class MaterialController
         }
 
         // Validation des données
-        $errors = $this->materialModel->validateData($_POST);
+        $errors = $this->validateMaterialData($_POST);
         if (!empty($errors)) {
             foreach ($errors as $error) {
                 Session::setFlash('error', $error);
@@ -111,11 +200,12 @@ class MaterialController
                 'description' => trim($_POST['description'] ?? ''),
                 'prix_mensuel' => (float)$_POST['prix_mensuel'],
                 'depot_garantie' => (float)$_POST['depot_garantie'],
-                'actif' => isset($_POST['actif']) ? 1 : 0
+                'actif' => isset($_POST['actif']) ? 1 : 0,
+                'date_creation' => date('Y-m-d H:i:s')
             ];
 
             // Créer le matériel
-            $materialId = $this->materialModel->create($data);
+            $materialId = Database::insert('modeles_materiel', $data);
 
             Logger::info('Nouveau matériel créé', [
                 'material_id' => $materialId,
@@ -140,7 +230,7 @@ class MaterialController
     public function show($id)
     {
         try {
-            $material = $this->materialModel->findById($id);
+            $material = Database::fetch("SELECT * FROM modeles_materiel WHERE id = ?", [$id]);
             if (!$material) {
                 Session::setFlash('error', 'Matériel non trouvé');
                 header('Location: /materials');
@@ -148,7 +238,7 @@ class MaterialController
             }
 
             // Statistiques d'usage
-            $usage_stats = $this->materialModel->getUsageStats($id);
+            $usage_stats = $this->getUsageStats($id);
 
             // Formules utilisant ce matériel
             $plans = Database::fetchAll("
@@ -163,12 +253,12 @@ class MaterialController
                 SELECT ml.*, c.raison_sociale, ac.statut as abonnement_statut
                 FROM materiel_loue ml
                 JOIN clients c ON ml.client_id = c.id
-                JOIN abonnements_clients ac ON ml.abonnement_id = ac.id
+                LEFT JOIN abonnements_clients ac ON ml.abonnement_id = ac.id
                 WHERE ml.modele_materiel_id = ? AND ml.statut = 'loue'
                 ORDER BY ml.date_location DESC
             ", [$id]);
 
-            // Historique des locations (dernières 10)
+            // Historique des locations
             $rental_history = Database::fetchAll("
                 SELECT ml.*, c.raison_sociale
                 FROM materiel_loue ml
@@ -178,7 +268,14 @@ class MaterialController
                 LIMIT 10
             ", [$id]);
 
-            $pageTitle = 'Détails du matériel - ' . $material['nom'];
+            // Définir les variables globales
+            $GLOBALS['material'] = $material;
+            $GLOBALS['usage_stats'] = $usage_stats;
+            $GLOBALS['plans'] = $plans;
+            $GLOBALS['rentals'] = $rentals;
+            $GLOBALS['rental_history'] = $rental_history;
+            $GLOBALS['pageTitle'] = 'Détails du matériel - ' . $material['nom'];
+
             require_once 'app/Views/materials/show.php';
 
         } catch (\Exception $e) {
@@ -195,18 +292,21 @@ class MaterialController
     public function edit($id)
     {
         try {
-            $material = $this->materialModel->findById($id);
+            $material = Database::fetch("SELECT * FROM modeles_materiel WHERE id = ?", [$id]);
             if (!$material) {
                 Session::setFlash('error', 'Matériel non trouvé');
                 header('Location: /materials');
                 exit;
             }
 
-            $pageTitle = 'Modifier le matériel - ' . $material['nom'];
+            // Définir les variables globales
+            $GLOBALS['material'] = $material;
+            $GLOBALS['pageTitle'] = 'Modifier le matériel - ' . $material['nom'];
+
             require_once 'app/Views/materials/edit.php';
 
         } catch (\Exception $e) {
-            Logger::error("Erreur lors de la récupération du matériel", [
+            Logger::error("Erreur lors de la récupération du matériel pour édition", [
                 'material_id' => $id,
                 'error' => $e->getMessage()
             ]);
@@ -231,7 +331,7 @@ class MaterialController
         }
 
         // Vérifier que le matériel existe
-        $material = $this->materialModel->findById($id);
+        $material = Database::fetch("SELECT * FROM modeles_materiel WHERE id = ?", [$id]);
         if (!$material) {
             Session::setFlash('error', 'Matériel non trouvé');
             header('Location: /materials');
@@ -239,7 +339,7 @@ class MaterialController
         }
 
         // Validation des données
-        $errors = $this->materialModel->validateData($_POST, $id);
+        $errors = $this->validateMaterialData($_POST, $id);
         if (!empty($errors)) {
             foreach ($errors as $error) {
                 Session::setFlash('error', $error);
@@ -259,7 +359,7 @@ class MaterialController
             ];
 
             // Mettre à jour le matériel
-            $this->materialModel->update($id, $data);
+            Database::update('modeles_materiel', $data, 'id = ?', [$id]);
 
             Logger::info('Matériel modifié', [
                 'material_id' => $id,
@@ -286,7 +386,7 @@ class MaterialController
     public function toggleStatus($id)
     {
         try {
-            $material = $this->materialModel->findById($id);
+            $material = Database::fetch("SELECT * FROM modeles_materiel WHERE id = ?", [$id]);
             if (!$material) {
                 Session::setFlash('error', 'Matériel non trouvé');
                 header('Location: /materials');
@@ -294,21 +394,22 @@ class MaterialController
             }
 
             // Vérifier si le matériel peut être désactivé
-            if ($material['actif'] && $this->materialModel->isUsedInPlans($id)) {
+            if ($material['actif'] && $this->isUsedInPlans($id)) {
                 Session::setFlash('error', 'Impossible de désactiver un matériel utilisé dans des formules actives');
                 header('Location: /materials');
                 exit;
             }
 
-            $this->materialModel->toggleStatus($id);
+            $newStatus = $material['actif'] ? 0 : 1;
+            Database::update('modeles_materiel', ['actif' => $newStatus], 'id = ?', [$id]);
 
-            $statusText = $material['actif'] ? 'désactivé' : 'activé';
+            $statusText = $newStatus ? 'activé' : 'désactivé';
             Session::setFlash('success', "Matériel {$statusText} avec succès");
 
             Logger::info('Statut de matériel modifié', [
                 'material_id' => $id,
                 'old_status' => $material['actif'],
-                'new_status' => !$material['actif']
+                'new_status' => $newStatus
             ]);
 
         } catch (\Exception $e) {
@@ -326,7 +427,7 @@ class MaterialController
     public function delete($id)
     {
         try {
-            $material = $this->materialModel->findById($id);
+            $material = Database::fetch("SELECT * FROM modeles_materiel WHERE id = ?", [$id]);
             if (!$material) {
                 Session::setFlash('error', 'Matériel non trouvé');
                 header('Location: /materials');
@@ -334,20 +435,20 @@ class MaterialController
             }
 
             // Vérifier que le matériel peut être supprimé
-            if ($this->materialModel->isUsedInPlans($id)) {
+            if ($this->isUsedInPlans($id)) {
                 Session::setFlash('error', 'Impossible de supprimer un matériel utilisé dans des formules d\'abonnement');
                 header('Location: /materials');
                 exit;
             }
 
-            if ($this->materialModel->isUsedInRentals($id)) {
+            if ($this->isUsedInRentals($id)) {
                 Session::setFlash('error', 'Impossible de supprimer un matériel actuellement loué');
                 header('Location: /materials');
                 exit;
             }
 
             // Supprimer le matériel
-            $this->materialModel->delete($id);
+            Database::delete('modeles_materiel', 'id = ?', [$id]);
 
             Logger::info('Matériel supprimé', [
                 'material_id' => $id,
@@ -368,6 +469,67 @@ class MaterialController
         exit;
     }
 
+    private function validateMaterialData($data, $id = null)
+    {
+        $errors = [];
+
+        // Validation du nom
+        if (empty($data['nom'])) {
+            $errors[] = 'Le nom du matériel est obligatoire';
+        } elseif (strlen($data['nom']) > 100) {
+            $errors[] = 'Le nom ne peut pas dépasser 100 caractères';
+        }
+
+        // Vérifier l'unicité du nom
+        $nameQuery = "SELECT id FROM modeles_materiel WHERE nom = ?";
+        $nameParams = [$data['nom']];
+        
+        if ($id) {
+            $nameQuery .= " AND id != ?";
+            $nameParams[] = $id;
+        }
+        
+        $existingMaterial = Database::fetch($nameQuery, $nameParams);
+        if ($existingMaterial) {
+            $errors[] = 'Ce nom de matériel existe déjà';
+        }
+
+        // Validation du prix mensuel
+        if (!is_numeric($data['prix_mensuel']) || $data['prix_mensuel'] < 0) {
+            $errors[] = 'Le prix mensuel doit être un nombre positif';
+        }
+
+        // Validation du dépôt de garantie
+        if (!is_numeric($data['depot_garantie']) || $data['depot_garantie'] < 0) {
+            $errors[] = 'Le dépôt de garantie doit être un nombre positif';
+        }
+
+        return $errors;
+    }
+
+    private function isUsedInPlans($materialId)
+    {
+        $count = Database::fetch("
+            SELECT COUNT(*) as count 
+            FROM formules_abonnement 
+            WHERE modele_materiel_id = ?
+        ", [$materialId]);
+        
+        return ($count['count'] ?? 0) > 0;
+    }
+
+    private function isUsedInRentals($materialId)
+    {
+        $count = Database::fetch("
+            SELECT COUNT(*) as count 
+            FROM materiel_loue 
+            WHERE modele_materiel_id = ? AND statut IN ('loue', 'maintenance')
+        ", [$materialId]);
+        
+        return ($count['count'] ?? 0) > 0;
+    }
+
+    // Méthodes pour les locations de matériel
     public function rentals()
     {
         try {
@@ -389,35 +551,48 @@ class MaterialController
             // Statistiques des locations
             $rental_stats = [
                 'total_rentals' => count($rentals),
-                'active_rentals' => array_reduce($rentals, function($count, $rental) {
-                    return $count + ($rental['statut'] === 'loue' ? 1 : 0);
-                }, 0),
-                'maintenance_count' => array_reduce($rentals, function($count, $rental) {
-                    return $count + ($rental['statut'] === 'maintenance' ? 1 : 0);
-                }, 0),
-                'returned_count' => array_reduce($rentals, function($count, $rental) {
-                    return $count + ($rental['statut'] === 'retourne' ? 1 : 0);
-                }, 0)
+                'active_rentals' => 0,
+                'maintenance_count' => 0,
+                'returned_count' => 0
             ];
 
-            $pageTitle = 'Locations de matériel';
+            foreach ($rentals as $rental) {
+                switch ($rental['statut']) {
+                    case 'loue':
+                        $rental_stats['active_rentals']++;
+                        break;
+                    case 'maintenance':
+                        $rental_stats['maintenance_count']++;
+                        break;
+                    case 'retourne':
+                        $rental_stats['returned_count']++;
+                        break;
+                }
+            }
+
+            // Définir les variables globales
+            $GLOBALS['rentals'] = $rentals;
+            $GLOBALS['rental_stats'] = $rental_stats;
+            $GLOBALS['pageTitle'] = 'Locations de matériel';
+
             require_once 'app/Views/materials/rentals.php';
 
         } catch (\Exception $e) {
             Logger::error("Erreur lors de la récupération des locations", [
                 'error' => $e->getMessage()
             ]);
+            
             Session::setFlash('error', 'Erreur lors du chargement des locations');
             
-            $rentals = [];
-            $rental_stats = [
+            $GLOBALS['rentals'] = [];
+            $GLOBALS['rental_stats'] = [
                 'total_rentals' => 0,
                 'active_rentals' => 0,
                 'maintenance_count' => 0,
                 'returned_count' => 0
             ];
+            $GLOBALS['pageTitle'] = 'Locations de matériel';
             
-            $pageTitle = 'Locations de matériel';
             require_once 'app/Views/materials/rentals.php';
         }
     }
@@ -441,7 +616,10 @@ class MaterialController
                 ORDER BY nom
             ");
 
-            $pageTitle = 'Nouvelle location de matériel';
+            $GLOBALS['clients'] = $clients;
+            $GLOBALS['materials'] = $materials;
+            $GLOBALS['pageTitle'] = 'Nouvelle location de matériel';
+
             require_once 'app/Views/materials/create-rental.php';
 
         } catch (\Exception $e) {
@@ -502,7 +680,8 @@ class MaterialController
                 'date_retour_prevue' => $_POST['date_retour_prevue'] ?? null,
                 'depot_verse' => (float)($_POST['depot_verse'] ?? 0),
                 'statut' => 'loue',
-                'abonnement_id' => !empty($_POST['abonnement_id']) ? (int)$_POST['abonnement_id'] : null
+                'abonnement_id' => !empty($_POST['abonnement_id']) ? (int)$_POST['abonnement_id'] : null,
+                'date_creation' => date('Y-m-d H:i:s')
             ];
 
             // Créer la location
