@@ -126,6 +126,7 @@ $router->get('/api/users/search', 'ApiController@searchUsers', ['auth']);
 $router->get('/api/materials/available', 'ApiController@getAvailableMaterials', ['auth']);
 $router->get('/api/categories/tree', 'ApiController@getCategoriesTree', ['auth']);
 $router->get('/api/stats/dashboard', 'ApiController@getDashboardStats', ['auth']);
+$router->post('/api/subscription-plans/price-suggestion', 'SubscriptionPlanController@getPricingSuggestion', ['auth']);
 
 // Routes des webhooks Stripe
 $router->post('/webhooks/stripe', 'WebhookController@stripe');

@@ -472,19 +472,46 @@ class SubscriptionPlanController
             }
         }
 
-        // Validation du prix de base
         if (!is_numeric($data['prix_base']) || $data['prix_base'] < 0) {
             $errors[] = 'Le prix de base doit être un nombre positif';
         }
 
-        // Validation du matériel pour les types qui l'incluent
+        // NOUVELLE VALIDATION : Vérification cohérence prix/matériel
         if (in_array($data['type_abonnement'], ['application_materiel', 'materiel_seul'])) {
-            if (empty($data['modele_materiel_id'])) {
-                $errors[] = 'Le modèle de matériel est obligatoire pour ce type d\'abonnement';
-            } else {
-                $material = Database::fetch("SELECT id FROM modeles_materiel WHERE id = ? AND actif = 1", [$data['modele_materiel_id']]);
-                if (!$material) {
-                    $errors[] = 'Modèle de matériel invalide';
+            if (!empty($data['modele_materiel_id'])) {
+                $material = Database::fetch(
+                    "SELECT prix_mensuel, nom FROM modeles_materiel WHERE id = ? AND actif = 1", 
+                    [$data['modele_materiel_id']]
+                );
+                
+                if ($material) {
+                    $materialPrice = (float)$material['prix_mensuel'];
+                    $basePrice = (float)$data['prix_base'];
+                    
+                    if ($data['type_abonnement'] === 'materiel_seul') {
+                        $minExpectedPrice = $data['duree'] === 'annuelle' 
+                            ? $materialPrice * 12 * 0.8  // Minimum 20% de remise max
+                            : $materialPrice * 0.8;      // Minimum 20% de remise max
+                            
+                        if ($basePrice < $minExpectedPrice) {
+                            $errors[] = sprintf(
+                                'Le prix de base (%.2f€) semble trop bas pour le matériel "%s" (%.2f€/mois). Prix minimum suggéré : %.2f€',
+                                $basePrice,
+                                $material['nom'],
+                                $materialPrice,
+                                $minExpectedPrice
+                            );
+                        }
+                    }
+                    
+                    // Log pour traçabilité
+                    Logger::info('Validation prix formule avec matériel', [
+                        'type' => $data['type_abonnement'],
+                        'base_price' => $basePrice,
+                        'material_price' => $materialPrice,
+                        'material_name' => $material['nom'],
+                        'duration' => $data['duree']
+                    ]);
                 }
             }
         }
@@ -504,7 +531,7 @@ class SubscriptionPlanController
             'cout_utilisateur_supplementaire' => !empty($data['cout_utilisateur_supplementaire']) ? (float)$data['cout_utilisateur_supplementaire'] : null,
             'duree' => $data['duree'],
             'nombre_sous_categories' => !empty($data['nombre_sous_categories']) ? (int)$data['nombre_sous_categories'] : null,
-            'prix_base' => (float)$data['prix_base'],
+            'prix_base' => $this->calculateBasePriceWithMaterial($data), // Prix calculé/validé
             'modele_materiel_id' => !empty($data['modele_materiel_id']) ? (int)$data['modele_materiel_id'] : null,
             'stripe_product_id' => null,
             'stripe_price_id' => null,
@@ -665,6 +692,141 @@ class SubscriptionPlanController
             // Ne pas faire échouer la suppression de la formule si Stripe échoue
             Session::setFlash('warning', 'Formule supprimée mais archivage Stripe échoué: ' . $e->getMessage());
         }
+    }
+
+    private function calculateBasePriceWithMaterial($data)
+    {
+        $basePrice = (float)$data['prix_base'];
+        $type = $data['type_abonnement'];
+        $duration = $data['duree'];
+        
+        // Si le type inclut du matériel, vérifier que le prix inclut bien le matériel
+        if (in_array($type, ['application_materiel', 'materiel_seul']) && !empty($data['modele_materiel_id'])) {
+            $material = Database::fetch(
+                "SELECT prix_mensuel FROM modeles_materiel WHERE id = ?", 
+                [$data['modele_materiel_id']]
+            );
+            
+            if ($material) {
+                $materialPrice = (float)$material['prix_mensuel'];
+                
+                // Logique de calcul selon le type
+                if ($type === 'materiel_seul') {
+                    // Pour matériel seul, le prix de base doit être au moins égal au prix du matériel
+                    if ($duration === 'annuelle') {
+                        $expectedMinPrice = $materialPrice * 12 * 0.9; // 10% de remise annuelle
+                    } else {
+                        $expectedMinPrice = $materialPrice;
+                    }
+                    
+                    if ($basePrice < $expectedMinPrice) {
+                        Logger::warning('Prix de base inférieur au prix du matériel ajusté', [
+                            'provided_price' => $basePrice,
+                            'expected_min_price' => $expectedMinPrice,
+                            'material_price' => $materialPrice,
+                            'duration' => $duration
+                        ]);
+                    }
+                } elseif ($type === 'application_materiel') {
+                    // Pour application + matériel, vérifier que le prix inclut bien le matériel
+                    // (On peut laisser une flexibilité ici car l'administrateur peut vouloir faire des offres)
+                    Logger::info('Prix formule application + matériel', [
+                        'total_price' => $basePrice,
+                        'material_price' => $materialPrice,
+                        'duration' => $duration
+                    ]);
+                }
+            }
+        }
+        
+        return $basePrice;
+    }
+
+    // Nouvelle méthode utilitaire pour obtenir les suggestions de prix
+    public function getPricingSuggestion()
+    {
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            http_response_code(405);
+            echo json_encode(['error' => 'Méthode non autorisée']);
+            exit;
+        }
+        
+        header('Content-Type: application/json');
+        
+        try {
+            $materialId = (int)($_POST['material_id'] ?? 0);
+            $type = $_POST['type'] ?? '';
+            $duration = $_POST['duration'] ?? 'mensuelle';
+            
+            if (!$materialId || !in_array($type, ['application_materiel', 'materiel_seul'])) {
+                echo json_encode(['error' => 'Paramètres invalides']);
+                exit;
+            }
+            
+            $material = Database::fetch(
+                "SELECT prix_mensuel, nom FROM modeles_materiel WHERE id = ? AND actif = 1", 
+                [$materialId]
+            );
+            
+            if (!$material) {
+                echo json_encode(['error' => 'Matériel non trouvé']);
+                exit;
+            }
+            
+            $materialPrice = (float)$material['prix_mensuel'];
+            $suggestions = [];
+            
+            if ($type === 'materiel_seul') {
+                if ($duration === 'annuelle') {
+                    $suggestions = [
+                        'recommended' => $materialPrice * 12 * 0.9, // 10% remise
+                        'minimum' => $materialPrice * 12 * 0.8,     // 20% remise max
+                        'premium' => $materialPrice * 12             // Prix plein
+                    ];
+                } else {
+                    $suggestions = [
+                        'recommended' => $materialPrice,
+                        'minimum' => $materialPrice * 0.9,  // 10% remise max
+                        'premium' => $materialPrice * 1.1   // 10% premium
+                    ];
+                }
+            } elseif ($type === 'application_materiel') {
+                // Prix suggéré = prix app de base + prix matériel
+                $baseAppPrice = 30; // Prix de base application (à ajuster selon vos tarifs)
+                
+                if ($duration === 'annuelle') {
+                    $suggestions = [
+                        'recommended' => ($baseAppPrice + $materialPrice) * 12 * 0.9,
+                        'minimum' => ($baseAppPrice + $materialPrice) * 12 * 0.8,
+                        'premium' => ($baseAppPrice + $materialPrice) * 12
+                    ];
+                } else {
+                    $suggestions = [
+                        'recommended' => $baseAppPrice + $materialPrice,
+                        'minimum' => ($baseAppPrice + $materialPrice) * 0.9,
+                        'premium' => ($baseAppPrice + $materialPrice) * 1.1
+                    ];
+                }
+            }
+            
+            echo json_encode([
+                'success' => true,
+                'material_name' => $material['nom'],
+                'material_price' => $materialPrice,
+                'suggestions' => $suggestions,
+                'duration' => $duration
+            ]);
+            
+        } catch (\Exception $e) {
+            Logger::error('Erreur lors du calcul des suggestions de prix', [
+                'error' => $e->getMessage(),
+                'post_data' => $_POST
+            ]);
+            
+            echo json_encode(['error' => 'Erreur serveur']);
+        }
+        
+        exit;
     }
 }
 ?>

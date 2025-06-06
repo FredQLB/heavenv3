@@ -477,6 +477,104 @@ function renderContent() {
         flex-direction: column;
     }
 }
+
+/* Styles CSS à ajouter dans create.php et edit.php */
+
+.price-calculation-info {
+    margin-top: 0.75rem;
+    padding: 0.75rem;
+    background: rgba(59, 130, 246, 0.1);
+    border: 1px solid rgba(59, 130, 246, 0.2);
+    border-radius: var(--border-radius);
+    font-size: 0.75rem;
+}
+
+.calculation-detail {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: #1d4ed8;
+    font-weight: 500;
+}
+
+.calculation-detail svg {
+    flex-shrink: 0;
+    color: #3b82f6;
+}
+
+/* Mise à jour de l'aperçu tarifaire pour mieux différencier les composants */
+.pricing-preview {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+    padding: 1.5rem;
+    margin-top: 1rem;
+}
+
+.pricing-preview h4 {
+    margin: 0 0 1rem 0;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.preview-content {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.preview-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0;
+}
+
+.preview-item.total {
+    border-top: 1px solid var(--border-color);
+    padding-top: 0.75rem;
+    margin-top: 0.75rem;
+    font-weight: 600;
+}
+
+.preview-label {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+}
+
+.preview-value {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.preview-value.highlight {
+    color: var(--primary-color);
+    font-size: 1.1rem;
+}
+
+/* Style pour indiquer que le prix est calculé automatiquement */
+.form-group.auto-calculated input {
+    background: rgba(59, 130, 246, 0.05);
+    border-color: rgba(59, 130, 246, 0.3);
+}
+
+.form-group.auto-calculated label::after {
+    content: " (calculé automatiquement)";
+    font-size: 0.75rem;
+    color: #3b82f6;
+    font-weight: normal;
+}
+
+/* Animation pour les changements de prix */
+@keyframes priceUpdate {
+    0% { background-color: rgba(59, 130, 246, 0.2); }
+    100% { background-color: transparent; }
+}
+
+.price-updated {
+    animation: priceUpdate 0.5s ease-out;
+}
 </style>
 
 <script>
@@ -500,6 +598,12 @@ function toggleMaterialSection() {
     // Rendre le matériel obligatoire ou non
     materialSelect.required = requiresMaterial;
     
+    // Réinitialiser la sélection de matériel si plus nécessaire
+    if (!requiresMaterial) {
+        materialSelect.value = '';
+        updateMaterialInfo();
+    }
+    
     updatePricingPreview();
 }
 
@@ -507,6 +611,8 @@ function updateMaterialInfo() {
     const materialSelect = document.getElementById('modele_materiel_id');
     const materialInfo = document.getElementById('materialInfo');
     const selectedOption = materialSelect.options[materialSelect.selectedIndex];
+    const typeSelect = document.getElementById('type_abonnement');
+    const basePriceInput = document.getElementById('prix_base');
     
     if (materialSelect.value && selectedOption.dataset.price) {
         const price = parseFloat(selectedOption.dataset.price);
@@ -516,8 +622,114 @@ function updateMaterialInfo() {
         document.getElementById('materialDeposit').textContent = deposit.toFixed(2) + '€';
         
         materialInfo.style.display = 'block';
+        
+        // NOUVELLE LOGIQUE : Mise à jour automatique du prix de base
+        updateBasePriceWithMaterial(price);
+        
     } else {
         materialInfo.style.display = 'none';
+        
+        // Si aucun matériel sélectionné, réinitialiser le prix de base
+        if (['application_materiel', 'materiel_seul'].includes(typeSelect.value)) {
+            updateBasePriceWithMaterial(0);
+        }
+    }
+    
+    updatePricingPreview();
+}
+
+function updateBasePriceWithMaterial(materialPrice) {
+    const typeSelect = document.getElementById('type_abonnement');
+    const basePriceInput = document.getElementById('prix_base');
+    const dureeSelect = document.getElementById('duree');
+    
+    // Sauvegarder le prix de base "application seule" si pas encore fait
+    if (!basePriceInput.dataset.baseAppPrice) {
+        basePriceInput.dataset.baseAppPrice = basePriceInput.value || '0';
+    }
+    
+    const baseAppPrice = parseFloat(basePriceInput.dataset.baseAppPrice) || 0;
+    let newPrice = 0;
+    
+    if (typeSelect.value === 'application_materiel') {
+        // Application + Matériel : prix app + prix matériel
+        newPrice = baseAppPrice + materialPrice;
+    } else if (typeSelect.value === 'materiel_seul') {
+        // Matériel seul : seulement le prix du matériel
+        newPrice = materialPrice;
+    } else {
+        // Application seule : prix de base application
+        newPrice = baseAppPrice;
+    }
+    
+    // Ajuster selon la durée (annuelle = 12 mois avec éventuelle remise)
+    if (dureeSelect.value === 'annuelle' && newPrice > 0) {
+        // Appliquer une remise de 10% pour l'annuel par exemple
+        newPrice = newPrice * 12 * 0.9; // 10% de remise
+    }
+    
+    basePriceInput.value = newPrice.toFixed(2);
+    
+    // Afficher une indication visuelle du calcul
+    updatePriceCalculationInfo(typeSelect.value, baseAppPrice, materialPrice, dureeSelect.value);
+}
+
+function updatePriceCalculationInfo(type, appPrice, materialPrice, duree) {
+    let existingInfo = document.getElementById('priceCalculationInfo');
+    if (existingInfo) {
+        existingInfo.remove();
+    }
+    
+    if ((type === 'application_materiel' || type === 'materiel_seul') && materialPrice > 0) {
+        const basePriceGroup = document.getElementById('prix_base').closest('.form-group');
+        const infoDiv = document.createElement('div');
+        infoDiv.id = 'priceCalculationInfo';
+        infoDiv.className = 'price-calculation-info';
+        
+        let calculationText = '';
+        if (type === 'application_materiel') {
+            calculationText = `Calcul automatique : ${appPrice.toFixed(2)}€ (app) + ${materialPrice.toFixed(2)}€ (matériel)`;
+        } else if (type === 'materiel_seul') {
+            calculationText = `Prix du matériel : ${materialPrice.toFixed(2)}€/mois`;
+        }
+        
+        if (duree === 'annuelle') {
+            calculationText += ' × 12 mois × 0.9 (remise 10%)';
+        }
+        
+        infoDiv.innerHTML = `
+            <div class="calculation-detail">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <path d="M12 16v-4"></path>
+                    <path d="M12 8h.01"></path>
+                </svg>
+                ${calculationText}
+            </div>
+        `;
+        
+        basePriceGroup.appendChild(infoDiv);
+    }
+}
+
+function handleDurationChange() {
+    // Recalculer le prix quand la durée change
+    const materialSelect = document.getElementById('modele_materiel_id');
+    const selectedOption = materialSelect.options[materialSelect.selectedIndex];
+    const materialPrice = selectedOption && selectedOption.dataset.price ? parseFloat(selectedOption.dataset.price) : 0;
+    
+    updateBasePriceWithMaterial(materialPrice);
+    updatePricingPreview();
+}
+
+function handleBasePriceManualChange() {
+    const basePriceInput = document.getElementById('prix_base');
+    const typeSelect = document.getElementById('type_abonnement');
+    
+    // Si l'utilisateur modifie manuellement le prix et qu'on est en mode "application seule",
+    // sauvegarder cette valeur comme nouveau prix de base application
+    if (typeSelect.value === 'application' || typeSelect.value === '') {
+        basePriceInput.dataset.baseAppPrice = basePriceInput.value;
     }
     
     updatePricingPreview();
@@ -529,12 +741,14 @@ function updatePricingPreview() {
     const materialSelect = document.getElementById('modele_materiel_id');
     const selectedMaterial = materialSelect.options[materialSelect.selectedIndex];
     const materialPrice = selectedMaterial && selectedMaterial.dataset.price ? parseFloat(selectedMaterial.dataset.price) : 0;
+    const typeSelect = document.getElementById('type_abonnement');
+    const dureeSelect = document.getElementById('duree');
     
     // Mise à jour de l'aperçu
     document.getElementById('previewBasePrice').textContent = basePrice.toFixed(2) + '€';
     
     const extraUsersItem = document.getElementById('previewExtraUsers');
-    if (extraUserCost > 0) {
+    if (extraUserCost > 0 && typeSelect.value !== 'materiel_seul') {
         document.getElementById('previewExtraPrice').textContent = '+' + extraUserCost.toFixed(2) + '€/utilisateur';
         extraUsersItem.style.display = 'flex';
     } else {
@@ -542,49 +756,68 @@ function updatePricingPreview() {
     }
     
     const materialItem = document.getElementById('previewMaterial');
-    if (materialPrice > 0) {
-        document.getElementById('previewMaterialPrice').textContent = materialPrice.toFixed(2) + '€/mois';
+    if (['application_materiel', 'materiel_seul'].includes(typeSelect.value) && materialPrice > 0) {
+        // Afficher le prix du matériel comme information, mais il est déjà inclus dans le prix de base
+        document.getElementById('previewMaterialPrice').textContent = materialPrice.toFixed(2) + '€/mois (inclus)';
         materialItem.style.display = 'flex';
     } else {
         materialItem.style.display = 'none';
     }
+    
+    // Calcul du prix total selon la durée
+    let totalPrice = basePrice;
+    if (dureeSelect.value === 'annuelle') {
+        // Le prix de base est déjà calculé pour l'année
+        totalPrice = basePrice;
+    }
+    
+    // Ajouter un item pour le prix total si différent du prix de base
+    let totalItem = document.getElementById('previewTotal');
+    if (!totalItem) {
+        totalItem = document.createElement('div');
+        totalItem.id = 'previewTotal';
+        totalItem.className = 'preview-item total';
+        totalItem.innerHTML = `
+            <span class="preview-label">Prix total :</span>
+            <span class="preview-value highlight" id="previewTotalValue">0,00€</span>
+        `;
+        document.querySelector('.preview-content').appendChild(totalItem);
+    }
+    
+    const totalValueSpan = document.getElementById('previewTotalValue');
+    if (dureeSelect.value === 'annuelle') {
+        totalValueSpan.textContent = totalPrice.toFixed(2) + '€/an';
+        totalItem.style.display = 'flex';
+    } else {
+        totalValueSpan.textContent = totalPrice.toFixed(2) + '€/mois';
+        totalItem.style.display = 'flex';
+    }
+    
+    // Animation de mise à jour
+    const priceInput = document.getElementById('prix_base');
+    priceInput.classList.add('price-updated');
+    setTimeout(() => {
+        priceInput.classList.remove('price-updated');
+    }, 500);
 }
 
-// Event listeners
-document.getElementById('modele_materiel_id').addEventListener('change', updateMaterialInfo);
-document.getElementById('prix_base').addEventListener('input', updatePricingPreview);
-document.getElementById('cout_utilisateur_supplementaire').addEventListener('input', updatePricingPreview);
-
-// Initialisation
+// Event listeners mis à jour
 document.addEventListener('DOMContentLoaded', function() {
+    const materialSelect = document.getElementById('modele_materiel_id');
+    const basePriceInput = document.getElementById('prix_base');
+    const dureeSelect = document.getElementById('duree');
+    const typeSelect = document.getElementById('type_abonnement');
+    
+    materialSelect.addEventListener('change', updateMaterialInfo);
+    dureeSelect.addEventListener('change', handleDurationChange);
+    basePriceInput.addEventListener('input', handleBasePriceManualChange);
+    basePriceInput.addEventListener('input', updatePricingPreview);
+    document.getElementById('cout_utilisateur_supplementaire').addEventListener('input', updatePricingPreview);
+    
+    // Initialisation
     toggleMaterialSection();
     updateMaterialInfo();
     updatePricingPreview();
-});
-
-// Validation du formulaire
-document.getElementById('planForm').addEventListener('submit', function(e) {
-    const typeSelect = document.getElementById('type_abonnement');
-    const materialSelect = document.getElementById('modele_materiel_id');
-    const basePrice = document.getElementById('prix_base');
-    
-    // Validation du matériel pour les types qui l'exigent
-    if (['application_materiel', 'materiel_seul'].includes(typeSelect.value)) {
-        if (!materialSelect.value) {
-            e.preventDefault();
-            alert('Veuillez sélectionner un modèle de matériel pour ce type d\'abonnement.');
-            materialSelect.focus();
-            return;
-        }
-    }
-    
-    // Validation du prix
-    if (!basePrice.value || parseFloat(basePrice.value) <= 0) {
-        e.preventDefault();
-        alert('Veuillez saisir un prix de base valide.');
-        basePrice.focus();
-        return;
-    }
 });
 </script>
 
