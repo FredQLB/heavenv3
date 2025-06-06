@@ -177,5 +177,231 @@ class MaterialModel
 
         return $errors;
     }
+
+    public function getStats()
+    {
+        $stats = [];
+
+        // Total des matériels
+        $stats['total'] = Database::table($this->table)->count();
+
+        // Matériels actifs
+        $stats['active'] = Database::table($this->table)
+            ->where('actif', 1)
+            ->count();
+
+        // Matériels actuellement loués
+        $stats['rented'] = Database::fetch("
+            SELECT COUNT(DISTINCT modele_materiel_id) as count
+            FROM materiel_loue
+            WHERE statut = 'loue'
+        ")['count'] ?? 0;
+
+        // Revenue total estimé des matériels
+        $revenue = Database::fetch("
+            SELECT COALESCE(SUM(fa.prix_base), 0) as total_revenue
+            FROM formules_abonnement fa
+            JOIN modeles_materiel mm ON fa.modele_materiel_id = mm.id
+            WHERE fa.actif = 1 AND mm.actif = 1
+        ");
+
+        $stats['total_revenue'] = $revenue['total_revenue'] ?? 0;
+
+        // Matériel le plus loué
+        $mostRented = Database::fetch("
+            SELECT mm.nom, COUNT(ml.id) as rental_count
+            FROM modeles_materiel mm
+            LEFT JOIN materiel_loue ml ON mm.id = ml.modele_materiel_id
+            WHERE mm.actif = 1
+            GROUP BY mm.id, mm.nom
+            ORDER BY rental_count DESC
+            LIMIT 1
+        ");
+
+        $stats['most_rented'] = $mostRented ? [
+            'name' => $mostRented['nom'],
+            'count' => $mostRented['rental_count']
+        ] : null;
+
+        return $stats;
+    }
+
+    public function getRecentActivity($limit = 10)
+    {
+        return Database::fetchAll("
+            SELECT 
+                ml.date_creation,
+                ml.statut,
+                mm.nom as materiel_nom,
+                c.raison_sociale as client_nom,
+                'rental' as type
+            FROM materiel_loue ml
+            JOIN modeles_materiel mm ON ml.modele_materiel_id = mm.id
+            JOIN clients c ON ml.client_id = c.id
+            ORDER BY ml.date_creation DESC
+            LIMIT ?
+        ", [$limit]);
+    }
+
+    public function getMaterialsForPlans()
+    {
+        return Database::table($this->table)
+            ->where('actif', 1)
+            ->select(['id', 'nom', 'prix_mensuel', 'depot_garantie'])
+            ->orderBy('nom')
+            ->get();
+    }
+
+    public function getMaterialsByCategory()
+    {
+        // Pour une future implémentation avec catégories de matériel
+        // Pour l'instant, retourne tous les matériels groupés par prix
+        return Database::fetchAll("
+            SELECT 
+                CASE 
+                    WHEN prix_mensuel < 50 THEN 'Économique'
+                    WHEN prix_mensuel < 100 THEN 'Standard'
+                    ELSE 'Premium'
+                END as category,
+                COUNT(*) as count,
+                AVG(prix_mensuel) as avg_price
+            FROM {$this->table}
+            WHERE actif = 1
+            GROUP BY category
+            ORDER BY avg_price
+        ");
+    }
+
+    public function getMaintenanceSchedule()
+    {
+        // Matériels nécessitant une maintenance préventive
+        return Database::fetchAll("
+            SELECT 
+                mm.id,
+                mm.nom,
+                COUNT(ml.id) as total_rentals,
+                SUM(DATEDIFF(COALESCE(ml.date_retour_effective, NOW()), ml.date_location)) as total_days_used,
+                MAX(ml.date_retour_effective) as last_return
+            FROM {$this->table} mm
+            LEFT JOIN materiel_loue ml ON mm.id = ml.modele_materiel_id
+            WHERE mm.actif = 1
+            GROUP BY mm.id, mm.nom
+            HAVING total_days_used > 180 -- Plus de 6 mois d'utilisation
+            ORDER BY total_days_used DESC
+        ");
+    }
+
+    public function getUtilizationReport($period = '12months')
+    {
+        $periodCondition = match($period) {
+            '1month' => "DATE_SUB(NOW(), INTERVAL 1 MONTH)",
+            '3months' => "DATE_SUB(NOW(), INTERVAL 3 MONTH)", 
+            '6months' => "DATE_SUB(NOW(), INTERVAL 6 MONTH)",
+            '12months' => "DATE_SUB(NOW(), INTERVAL 12 MONTH)",
+            default => "DATE_SUB(NOW(), INTERVAL 12 MONTH)"
+        };
+
+        return Database::fetchAll("
+            SELECT 
+                mm.id,
+                mm.nom,
+                mm.prix_mensuel,
+                COUNT(ml.id) as rental_count,
+                SUM(DATEDIFF(COALESCE(ml.date_retour_effective, NOW()), ml.date_location)) as total_days_rented,
+                AVG(DATEDIFF(COALESCE(ml.date_retour_effective, NOW()), ml.date_location)) as avg_rental_duration,
+                SUM(ml.depot_verse) as total_deposits_collected,
+                SUM(CASE WHEN ml.statut = 'loue' THEN 1 ELSE 0 END) as currently_rented
+            FROM {$this->table} mm
+            LEFT JOIN materiel_loue ml ON mm.id = ml.modele_materiel_id 
+                AND ml.date_creation >= {$periodCondition}
+            WHERE mm.actif = 1
+            GROUP BY mm.id, mm.nom, mm.prix_mensuel
+            ORDER BY rental_count DESC, mm.nom
+        ");
+    }
+
+    public function getAvailableMaterials()
+    {
+        // Matériels disponibles (non loués actuellement)
+        return Database::fetchAll("
+            SELECT mm.*
+            FROM {$this->table} mm
+            LEFT JOIN materiel_loue ml ON mm.id = ml.modele_materiel_id 
+                AND ml.statut IN ('loue', 'maintenance')
+            WHERE mm.actif = 1 AND ml.id IS NULL
+            ORDER BY mm.nom
+        ");
+    }
+
+    public function canDelete($id)
+    {
+        $reasons = [];
+
+        // Vérifier les formules d'abonnement
+        $plansCount = Database::table('formules_abonnement')
+            ->where('modele_materiel_id', $id)
+            ->count();
+
+        if ($plansCount > 0) {
+            $reasons[] = "Utilisé dans {$plansCount} formule(s) d'abonnement";
+        }
+
+        // Vérifier les locations actives
+        $activeRentalsCount = Database::table('materiel_loue')
+            ->where('modele_materiel_id', $id)
+            ->whereIn('statut', ['loue', 'maintenance'])
+            ->count();
+
+        if ($activeRentalsCount > 0) {
+            $reasons[] = "A {$activeRentalsCount} location(s) active(s)";
+        }
+
+        return [
+            'can_delete' => empty($reasons),
+            'reasons' => $reasons
+        ];
+    }
+
+    public function clone($id, $newName = null)
+    {
+        $original = $this->findById($id);
+        if (!$original) {
+            throw new \Exception('Matériel original non trouvé');
+        }
+
+        // Préparer les données du clone
+        $cloneData = $original;
+        unset($cloneData['id']);
+        unset($cloneData['date_creation']);
+
+        // Nouveau nom
+        if ($newName) {
+            $cloneData['nom'] = $newName;
+        } else {
+            $cloneData['nom'] = $original['nom'] . ' (Copie)';
+        }
+
+        // Vérifier l'unicité du nom
+        $counter = 1;
+        $baseName = $cloneData['nom'];
+        while (Database::table($this->table)->where('nom', $cloneData['nom'])->exists()) {
+            $cloneData['nom'] = $baseName . ' (' . $counter . ')';
+            $counter++;
+        }
+
+        // Le clone est inactif par défaut
+        $cloneData['actif'] = 0;
+
+        return $this->create($cloneData);
+    }
+
+    /**
+     * Méthodes pour compatibilité avec DatabaseQueryBuilder
+     */
+    private function where($column, $operator, $value = null)
+    {
+        // Cette méthode sera utilisée dans search() si besoin
+        // Pour l'instant, utilisation directe de Database::table()
+    }
 }
 ?>

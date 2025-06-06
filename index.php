@@ -82,14 +82,26 @@ $router->get('/categories/{id}/edit', 'CategoryController@edit', ['auth']);
 $router->post('/categories/{id}/update', 'CategoryController@update', ['auth']);
 $router->get('/categories/{id}/delete', 'CategoryController@delete', ['auth']);
 
-// Routes du matériel
+// Routes principales du matériel
 $router->get('/materials', 'MaterialController@index', ['auth']);
 $router->get('/materials/create', 'MaterialController@create', ['auth']);
 $router->post('/materials', 'MaterialController@store', ['auth']);
+$router->get('/materials/{id}', 'MaterialController@show', ['auth']);
 $router->get('/materials/{id}/edit', 'MaterialController@edit', ['auth']);
 $router->post('/materials/{id}/update', 'MaterialController@update', ['auth']);
 $router->get('/materials/{id}/toggle', 'MaterialController@toggleStatus', ['auth']);
 $router->get('/materials/{id}/delete', 'MaterialController@delete', ['auth']);
+
+// Routes des locations de matériel
+$router->get('/materials/rentals', 'MaterialController@rentals', ['auth']);
+$router->get('/materials/rentals/create', 'MaterialController@createRental', ['auth']);
+$router->post('/materials/rentals', 'MaterialController@storeRental', ['auth']);
+$router->post('/materials/rentals/{id}/update', 'MaterialController@updateRental', ['auth']);
+
+// Routes API pour le matériel
+$router->get('/api/materials/available', 'ApiController@getAvailableMaterials', ['auth']);
+$router->get('/api/materials/{id}/stats', 'ApiController@getMaterialStats', ['auth']);
+$router->get('/api/materials/search', 'ApiController@searchMaterials', ['auth']);
 
 // Routes des abonnements clients
 $router->get('/subscriptions', 'SubscriptionController@index', ['auth']);

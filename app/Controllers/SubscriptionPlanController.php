@@ -187,21 +187,30 @@ class SubscriptionPlanController
     public function edit($id)
     {
         try {
-            // Récupérer la formule
+            // Validation de l'ID
+            if (!is_numeric($id) || $id <= 0) {
+                Session::setFlash('error', 'ID de formule invalide');
+                header('Location: /subscription-plans');
+                exit;
+            }
+
+            // Récupérer la formule avec les informations du matériel
             $plan = Database::fetch("
-                SELECT fa.*, mm.nom as materiel_nom 
+                SELECT fa.*, mm.nom as materiel_nom, mm.description as materiel_description,
+                       mm.prix_mensuel as materiel_prix, mm.depot_garantie as materiel_depot
                 FROM formules_abonnement fa
                 LEFT JOIN modeles_materiel mm ON fa.modele_materiel_id = mm.id
                 WHERE fa.id = ?
             ", [$id]);
 
             if (!$plan) {
+                Logger::warning("Formule non trouvée lors de l'édition", ['plan_id' => $id]);
                 Session::setFlash('error', 'Formule non trouvée');
                 header('Location: /subscription-plans');
                 exit;
             }
 
-            // Récupérer les modèles de matériel
+            // Récupérer tous les modèles de matériel pour le formulaire
             $materials = Database::query("
                 SELECT id, nom, description, prix_mensuel, depot_garantie 
                 FROM modeles_materiel 
@@ -209,14 +218,25 @@ class SubscriptionPlanController
                 ORDER BY nom
             ")->fetchAll();
 
-            $pageTitle = 'Modifier la formule d\'abonnement';
+            // Définir les variables globales pour la vue
+            $GLOBALS['plan'] = $plan;
+            $GLOBALS['materials'] = $materials;
+            $GLOBALS['pageTitle'] = 'Modifier la formule d\'abonnement';
+
+            Logger::info("Chargement de la page d'édition de formule", [
+                'plan_id' => $id,
+                'plan_name' => $plan['nom']
+            ]);
+
             require_once 'app/Views/subscriptions/plans/edit.php';
 
         } catch (\Exception $e) {
-            Logger::error("Erreur lors de la récupération de la formule", [
+            Logger::error("Erreur lors de la récupération de la formule pour édition", [
                 'plan_id' => $id,
-                'error' => $e->getMessage()
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
             ]);
+            
             Session::setFlash('error', 'Erreur lors du chargement de la formule');
             header('Location: /subscription-plans');
             exit;
