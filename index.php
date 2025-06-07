@@ -212,6 +212,229 @@ $router->post('/admin/send-invoice-notifications', function() {
 }, ['auth']);
 
 
+// Retour de succès Stripe Checkout
+$router->get('/subscriptions/checkout-success', 'SubscriptionController@checkoutSuccess');
+
+// Retour d'annulation Stripe Checkout  
+$router->get('/subscriptions/checkout-cancel', 'SubscriptionController@checkoutCancel');
+
+// API pour obtenir les informations d'une formule (avec dépôts)
+$router->get('/api/subscription-plans/{id}/pricing', function($id) {
+    header('Content-Type: application/json');
+    
+    try {
+        $formule = Database::fetch("
+            SELECT fa.*, mm.nom as materiel_nom, mm.prix_mensuel, mm.depot_garantie
+            FROM formules_abonnement fa
+            LEFT JOIN modeles_materiel mm ON fa.modele_materiel_id = mm.id
+            WHERE fa.id = ? AND fa.actif = 1
+        ", [$id]);
+
+        if (!$formule) {
+            echo json_encode(['error' => 'Formule non trouvée']);
+            exit;
+        }
+
+        echo json_encode([
+            'success' => true,
+            'formule' => $formule,
+            'pricing' => [
+                'base_price' => $formule['prix_base'],
+                'extra_user_cost' => $formule['cout_utilisateur_supplementaire'] ?? 0,
+                'deposit_amount' => $formule['depot_garantie'] ?? 0,
+                'material_name' => $formule['materiel_nom'],
+                'duration' => $formule['duree']
+            ]
+        ]);
+
+    } catch (\Exception $e) {
+        \App\Helpers\Logger::error('Erreur API pricing formule', [
+            'formule_id' => $id,
+            'error' => $e->getMessage()
+        ]);
+        echo json_encode(['error' => 'Erreur serveur']);
+    }
+    exit;
+}, ['auth']);
+
+// API pour calculer le prix total avec dépôt
+$router->post('/api/subscriptions/calculate-total', function() {
+    header('Content-Type: application/json');
+    
+    try {
+        $formuleId = (int)($_POST['formule_id'] ?? 0);
+        $nombreUtilisateurs = (int)($_POST['nombre_utilisateurs'] ?? 1);
+
+        if (!$formuleId) {
+            echo json_encode(['error' => 'ID de formule requis']);
+            exit;
+        }
+
+        $formule = Database::fetch("
+            SELECT fa.*, mm.depot_garantie
+            FROM formules_abonnement fa
+            LEFT JOIN modeles_materiel mm ON fa.modele_materiel_id = mm.id
+            WHERE fa.id = ? AND fa.actif = 1
+        ", [$formuleId]);
+
+        if (!$formule) {
+            echo json_encode(['error' => 'Formule non trouvée']);
+            exit;
+        }
+
+        // Calculer le prix de l'abonnement
+        $utilisateursInclus = $formule['nombre_utilisateurs_inclus'];
+        $utilisateursSupplementaires = max(0, $nombreUtilisateurs - $utilisateursInclus);
+        $coutUtilisateurSupp = $formule['cout_utilisateur_supplementaire'] ?? 0;
+
+        $prixBase = $formule['prix_base'];
+        $prixUtilisateursSupp = $utilisateursSupplementaires * $coutUtilisateurSupp;
+        $prixAbonnement = $prixBase + $prixUtilisateursSupp;
+
+        // Dépôt de garantie
+        $depotGarantie = 0;
+        if (in_array($formule['type_abonnement'], ['application_materiel', 'materiel_seul'])) {
+            $depotGarantie = $formule['depot_garantie'] ?? 0;
+        }
+
+        // Premier paiement = abonnement + dépôt
+        $premierPaiement = $prixAbonnement + $depotGarantie;
+
+        echo json_encode([
+            'success' => true,
+            'pricing' => [
+                'base_price' => $prixBase,
+                'extra_users_cost' => $prixUtilisateursSupp,
+                'subscription_total' => $prixAbonnement,
+                'deposit_amount' => $depotGarantie,
+                'first_payment' => $premierPaiement,
+                'monthly_recurring' => $prixAbonnement,
+                'annual_total' => $prixAbonnement * 12,
+                'users_included' => $utilisateursInclus,
+                'extra_users' => $utilisateursSupplementaires,
+                'requires_payment_setup' => $premierPaiement > 0
+            ]
+        ]);
+
+    } catch (\Exception $e) {
+        \App\Helpers\Logger::error('Erreur API calcul total', [
+            'error' => $e->getMessage(),
+            'post_data' => $_POST
+        ]);
+        echo json_encode(['error' => 'Erreur serveur']);
+    }
+    exit;
+}, ['auth']);
+
+// Route pour vérifier le statut de paiement d'un client
+$router->get('/api/clients/{id}/payment-status', function($id) {
+    header('Content-Type: application/json');
+    
+    try {
+        $client = Database::fetch("SELECT * FROM clients WHERE id = ?", [$id]);
+        
+        if (!$client) {
+            echo json_encode(['error' => 'Client non trouvé']);
+            exit;
+        }
+
+        $paymentStatus = [
+            'has_stripe_customer' => !empty($client['stripe_customer_id']),
+            'needs_payment_setup' => true,
+            'can_auto_charge' => false
+        ];
+
+        if (!empty($client['stripe_customer_id'])) {
+            try {
+                $hasValidPM = \App\Services\StripeService::hasValidPaymentMethod($client['stripe_customer_id']);
+                $paymentStatus['needs_payment_setup'] = !$hasValidPM;
+                $paymentStatus['can_auto_charge'] = $hasValidPM;
+            } catch (\Exception $e) {
+                // En cas d'erreur Stripe, assume qu'un setup est nécessaire
+                \App\Helpers\Logger::warning('Erreur vérification Stripe pour client', [
+                    'client_id' => $id,
+                    'error' => $e->getMessage()
+                ]);
+            }
+        }
+
+        echo json_encode([
+            'success' => true,
+            'payment_status' => $paymentStatus
+        ]);
+
+    } catch (\Exception $e) {
+        \App\Helpers\Logger::error('Erreur API statut paiement client', [
+            'client_id' => $id,
+            'error' => $e->getMessage()
+        ]);
+        echo json_encode(['error' => 'Erreur serveur']);
+    }
+    exit;
+}, ['auth']);
+
+// Route pour forcer la synchronisation avec Stripe
+$router->post('/api/subscriptions/{id}/sync-stripe', function($id) {
+    header('Content-Type: application/json');
+    
+    try {
+        $subscription = Database::fetch("SELECT * FROM abonnements_clients WHERE id = ?", [$id]);
+        
+        if (!$subscription) {
+            echo json_encode(['error' => 'Abonnement non trouvé']);
+            exit;
+        }
+
+        // Tenter de synchroniser avec Stripe
+        if (!empty($subscription['stripe_subscription_id'])) {
+            $stripeSubscription = \App\Services\StripeService::retrieveSubscription($subscription['stripe_subscription_id']);
+            
+            // Mettre à jour le statut local selon Stripe
+            $newStatus = match($stripeSubscription->status) {
+                'active' => 'actif',
+                'canceled' => 'annule',
+                'paused' => 'suspendu',
+                'incomplete' => 'en_attente',
+                default => $subscription['statut']
+            };
+
+            if ($newStatus !== $subscription['statut']) {
+                Database::update('abonnements_clients', [
+                    'statut' => $newStatus,
+                    'date_modification' => date('Y-m-d H:i:s')
+                ], 'id = ?', [$id]);
+
+                echo json_encode([
+                    'success' => true,
+                    'updated' => true,
+                    'old_status' => $subscription['statut'],
+                    'new_status' => $newStatus
+                ]);
+            } else {
+                echo json_encode([
+                    'success' => true,
+                    'updated' => false,
+                    'message' => 'Abonnement déjà synchronisé'
+                ]);
+            }
+        } else {
+            echo json_encode([
+                'success' => false,
+                'error' => 'Aucun abonnement Stripe associé'
+            ]);
+        }
+
+    } catch (\Exception $e) {
+        \App\Helpers\Logger::error('Erreur synchronisation Stripe', [
+            'subscription_id' => $id,
+            'error' => $e->getMessage()
+        ]);
+        echo json_encode(['error' => 'Erreur lors de la synchronisation']);
+    }
+    exit;
+}, ['auth']);
+
+
 
 // Routes d'erreur
 $router->get('/error/403', function() {

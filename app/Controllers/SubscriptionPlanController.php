@@ -166,6 +166,10 @@ class SubscriptionPlanController
             Logger::debug('Données à insérer pour la formule', $data);
 
             // Insérer la formule
+            
+            $totalDeposit = $data["DepositAmount"] * $data["nombre_utilisateurs_inclus"];
+            $data["DepositAmount"] = $totalDeposit;
+
             $planId = Database::insert('formules_abonnement', $data);
             
             if (!$planId) {
@@ -176,6 +180,7 @@ class SubscriptionPlanController
                 'plan_id' => $planId,
                 'name' => $data['nom']
             ]);
+
 
             // Créer le produit Stripe après l'insertion en base
             $this->createStripeProduct($planId, $data);
@@ -298,8 +303,29 @@ class SubscriptionPlanController
         try {
             Database::beginTransaction();
 
+            $totalDeposit = $data["DepositAmount"] * $data["nombre_utilisateurs_inclus"];
+            $data["DepositAmount"] = $totalDeposit;
+
             // Mettre à jour la formule
-            Database::update('formules_abonnement', $data, 'id = ?', [$id]);
+
+            //Database::update('formules_abonnement', $data, 'id = ?', [$id]);
+
+            Database::update('formules_abonnement', 
+                [
+                    'nom' => $data["nom"],
+                    'type_abonnement' => $data["type_abonnement"],
+                    'nombre_utilisateurs_inclus' => $data["nombre_utilisateurs_inclus"],
+                    'cout_utilisateur_supplementaire' => $data["cout_utilisateur_supplementaire"],
+                    'duree' => $data["duree"],
+                    'nombre_sous_categories' => $data["nombre_sous_categories"],
+                    'prix_base' => $data["prix_base"],
+                    'modele_materiel_id' => $data["modele_materiel_id"],
+                    'DepositAmount' => $data["DepositAmount"],
+                    'actif' => $data["actif"]
+                ], 
+                'id = ?', 
+                [$id]
+            );
 
             // Log de modification
             Logger::info('Formule d\'abonnement modifiée', [
@@ -313,7 +339,7 @@ class SubscriptionPlanController
 
             Database::commit();
 
-            Session::setFlash('success', 'Formule d\'abonnement modifiée avec succès');
+            Session::setFlash('success', implode( ',', $data ));
             header('Location: /subscription-plans');
             exit;
 
@@ -324,7 +350,7 @@ class SubscriptionPlanController
                 'error' => $e->getMessage(),
                 'data' => $data
             ]);
-            Session::setFlash('error', 'Erreur lors de la modification de la formule');
+            Session::setFlash('error', 'Erreur lors de la modification de la formule' . $e->getMessage());
             header('Location: /subscription-plans/' . $id . '/edit');
             exit;
         }
@@ -529,6 +555,7 @@ class SubscriptionPlanController
             'type_abonnement' => $data['type_abonnement'],
             'nombre_utilisateurs_inclus' => (int)$data['nombre_utilisateurs_inclus'],
             'cout_utilisateur_supplementaire' => !empty($data['cout_utilisateur_supplementaire']) ? (float)$data['cout_utilisateur_supplementaire'] : null,
+            'DepositAmount' => !empty($data['DepositAmount']) ? (float)$data['DepositAmount'] : null,
             'duree' => $data['duree'],
             'nombre_sous_categories' => !empty($data['nombre_sous_categories']) ? (int)$data['nombre_sous_categories'] : null,
             'prix_base' => $this->calculateBasePriceWithMaterial($data), // Prix calculé/validé
@@ -564,6 +591,12 @@ class SubscriptionPlanController
             if (!empty($data['cout_utilisateur_supplementaire']) && $data['cout_utilisateur_supplementaire'] > 0) {
                 $extraUserPrice = \App\Services\StripeService::createExtraUserPrice($product->id, $data);
             }
+
+            // Créer le prix du dépôt de garantie
+            $depositAmount = null;
+            if (!empty($data['DepositAmount']) && $data['DepositAmount'] > 0) {
+                $depositAmount = \App\Services\StripeService::createDepositPrice($product->id, $data);
+            }
             
             // Mettre à jour la formule avec les IDs Stripe
             $updateData = [
@@ -574,6 +607,10 @@ class SubscriptionPlanController
             if ($extraUserPrice) {
                 $updateData['stripe_price_supplementaire_id'] = $extraUserPrice->id;
             }
+
+            if ($depositAmount) {
+                $updateData['stripe_caution_id'] = $depositAmount->id;
+            }
             
             Database::update('formules_abonnement', $updateData, 'id = ?', [$planId]);
             
@@ -581,7 +618,8 @@ class SubscriptionPlanController
                 'plan_id' => $planId,
                 'product_id' => $product->id,
                 'price_id' => $price->id,
-                'extra_price_id' => $extraUserPrice ? $extraUserPrice->id : null
+                'extra_price_id' => $extraUserPrice ? $extraUserPrice->id : null,
+                'caution_price_id' => $depositAmount ? $depositAmount->id : null
             ]);
             
         } catch (\Exception $e) {
@@ -605,7 +643,6 @@ class SubscriptionPlanController
                 $this->createStripeProduct($planId, $newData);
                 return;
             }
-            
             // Ajouter l'ID du plan aux données
             $newData['id'] = $planId;
             
@@ -647,6 +684,29 @@ class SubscriptionPlanController
                     // Supprimer la référence au prix supplémentaire
                     Database::update('formules_abonnement', 
                         ['stripe_price_supplementaire_id' => null], 
+                        'id = ?', 
+                        [$planId]
+                    );
+                }
+            }
+
+            // Gérer le prix de la Caution
+            $oldDepositCost = $oldData['DepositAmount'] ?? 0;
+            $newDepositCost = $newData['DepositAmount'] ?? 0;
+            
+            if ($oldDepositCost != $newDepositCost) {
+                if ($oldDepositCost > 0) {
+                    // Créer ou mettre à jour le prix supplémentaire
+                    $extraDespositPrice = \App\Services\StripeService::createDepositPrice($oldData['stripe_product_id'], $newData);
+                    Database::update('formules_abonnement', 
+                        ['stripe_caution_id' => $extraDepositPrice->id], 
+                        'id = ?', 
+                        [$planId]
+                    );
+                } else {
+                    // Supprimer la référence au prix supplémentaire
+                    Database::update('formules_abonnement', 
+                        ['stripe_caution_id' => null], 
                         'id = ?', 
                         [$planId]
                     );

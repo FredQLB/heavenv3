@@ -78,6 +78,21 @@ function renderContent() {
                 </div>
             </div>
 
+            <div class="form-section">
+                <h3>Tarification</h3>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="prix_base">Prix de base (€) *</label>
+                        <input type="number" id="prix_base" name="prix_base" 
+                               min="0" step="0.01" required 
+                               value="<?= htmlspecialchars($_POST['prix_base'] ?? $plan['prix_base']) ?>"
+                               placeholder="0.00">
+                        <small class="form-help">Prix de base de la formule (hors utilisateurs supplémentaires)</small>
+                    </div>
+                </div>
+            </div>
+
             <!-- Configuration utilisateurs -->
             <div class="form-section" id="usersSection">
                 <h3>Configuration des utilisateurs</h3>
@@ -145,31 +160,19 @@ function renderContent() {
                     <div class="material-details">
                         <div class="material-detail">
                             <span class="detail-label">Prix mensuel :</span>
-                            <span class="detail-value" id="materialPrice">-</span>
+                            <span class="detail-value" id="materialPrice"><?= ($_POST['modele_materiel_id'] ?? $plan['modele_materiel_id']) == $material['id'] ? number_format($material['prix_mensuel'], 2) : '' ?></span>
                         </div>
                         <div class="material-detail">
                             <span class="detail-label">Dépôt de garantie :</span>
-                            <span class="detail-value" id="materialDeposit">-</span>
+                            <span class="detail-value" id="materialDeposit"><?= ($_POST['modele_materiel_id'] ?? $plan['modele_materiel_id']) == $material['id'] ? $plan["DepositAmount"] : '' ?></span>
+                            <input type="hidden" name="DepositAmount" value="<?= ($_POST['modele_materiel_id'] ?? $plan['modele_materiel_id']) == $material['id'] ? $plan["DepositAmount"] : '' ?>">
                         </div>
                     </div>
                 </div>
             </div>
 
             <!-- Tarification -->
-            <div class="form-section">
-                <h3>Tarification</h3>
-                
-                <div class="form-row">
-                    <div class="form-group">
-                        <label for="prix_base">Prix de base (€) *</label>
-                        <input type="number" id="prix_base" name="prix_base" 
-                               min="0" step="0.01" required 
-                               value="<?= htmlspecialchars($_POST['prix_base'] ?? $plan['prix_base']) ?>"
-                               placeholder="0.00">
-                        <small class="form-help">Prix de base de la formule (hors utilisateurs supplémentaires)</small>
-                    </div>
-                </div>
-                
+            <div class="form-section">        
                 <div class="pricing-preview" id="pricingPreview">
                     <h4>Aperçu tarifaire</h4>
                     <div class="preview-content">
@@ -185,6 +188,10 @@ function renderContent() {
                             <span class="preview-label">Matériel inclus :</span>
                             <span class="preview-value" id="previewMaterialPrice">0,00€/mois</span>
                         </div>
+                        <div class="preview-item" id="previewDeposit" style="display: none;">
+                            <span class="preview-label">Dépôt de Garantie :</span>
+                            <span class="preview-value" id="previewDepositPrice">0,00€</span>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -199,6 +206,7 @@ function renderContent() {
                     <div class="stripe-detail">
                         <span class="stripe-label">ID Produit Stripe :</span>
                         <span class="stripe-value"><?= htmlspecialchars($plan['stripe_product_id']) ?></span>
+                        <input type="hidden" name="stripe_product_id" id="stripe_product_id" value="<?= htmlspecialchars($plan['stripe_product_id']) ?>">
                     </div>
                     <?php endif; ?>
                     
@@ -206,6 +214,7 @@ function renderContent() {
                     <div class="stripe-detail">
                         <span class="stripe-label">ID Prix Stripe :</span>
                         <span class="stripe-value"><?= htmlspecialchars($plan['stripe_price_id']) ?></span>
+                        <input type="hidden" name="stripe_price_id" id="stripe_price_id" value="<?= htmlspecialchars($plan['stripe_price_id']) ?>">
                     </div>
                     <?php endif; ?>
                     
@@ -213,8 +222,18 @@ function renderContent() {
                     <div class="stripe-detail">
                         <span class="stripe-label">ID Prix Supplémentaire :</span>
                         <span class="stripe-value"><?= htmlspecialchars($plan['stripe_price_supplementaire_id']) ?></span>
+                        <input type="hidden" name="stripe_price_supplementaire_id" id="stripe_price_supplementaire_id" value="<?= htmlspecialchars($plan['stripe_price_supplementaire_id']) ?>">
                     </div>
                     <?php endif; ?>
+
+                    <?php if ($plan['stripe_caution_id']): ?>
+                    <div class="stripe-detail">
+                        <span class="stripe-label">ID Dépôt de Garantie :</span>
+                        <span class="stripe-value"><?= htmlspecialchars($plan['stripe_caution_id']) ?></span>
+                        <input type="hidden" name="stripe_caution_id" id="stripe_caution_id" value="<?= htmlspecialchars($plan['stripe_caution_id']) ?>">
+                    </div>
+                    <?php endif; ?>
+
                 </div>
             </div>
             <?php endif; ?>
@@ -407,6 +426,7 @@ function renderContent() {
     border-radius: 3px;
     position: relative;
     transition: var(--transition);
+    display: inline-block;
 }
 
 .checkbox-label input[type="checkbox"]:checked + .checkbox-custom {
@@ -573,104 +593,6 @@ function renderContent() {
         gap: 0.25rem;
     }
 }
-
-/* Styles CSS à ajouter dans create.php et edit.php */
-
-.price-calculation-info {
-    margin-top: 0.75rem;
-    padding: 0.75rem;
-    background: rgba(59, 130, 246, 0.1);
-    border: 1px solid rgba(59, 130, 246, 0.2);
-    border-radius: var(--border-radius);
-    font-size: 0.75rem;
-}
-
-.calculation-detail {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    color: #1d4ed8;
-    font-weight: 500;
-}
-
-.calculation-detail svg {
-    flex-shrink: 0;
-    color: #3b82f6;
-}
-
-/* Mise à jour de l'aperçu tarifaire pour mieux différencier les composants */
-.pricing-preview {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: var(--border-radius);
-    padding: 1.5rem;
-    margin-top: 1rem;
-}
-
-.pricing-preview h4 {
-    margin: 0 0 1rem 0;
-    font-size: 1rem;
-    font-weight: 600;
-    color: var(--text-primary);
-}
-
-.preview-content {
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-}
-
-.preview-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0.5rem 0;
-}
-
-.preview-item.total {
-    border-top: 1px solid var(--border-color);
-    padding-top: 0.75rem;
-    margin-top: 0.75rem;
-    font-weight: 600;
-}
-
-.preview-label {
-    font-size: 0.875rem;
-    color: var(--text-secondary);
-}
-
-.preview-value {
-    font-weight: 600;
-    color: var(--text-primary);
-}
-
-.preview-value.highlight {
-    color: var(--primary-color);
-    font-size: 1.1rem;
-}
-
-/* Style pour indiquer que le prix est calculé automatiquement */
-.form-group.auto-calculated input {
-    background: rgba(59, 130, 246, 0.05);
-    border-color: rgba(59, 130, 246, 0.3);
-}
-
-.form-group.auto-calculated label::after {
-    content: " (calculé automatiquement)";
-    font-size: 0.75rem;
-    color: #3b82f6;
-    font-weight: normal;
-}
-
-/* Animation pour les changements de prix */
-@keyframes priceUpdate {
-    0% { background-color: rgba(59, 130, 246, 0.2); }
-    100% { background-color: transparent; }
-}
-
-.price-updated {
-    animation: priceUpdate 0.5s ease-out;
-}
 </style>
 
 <script>
@@ -793,16 +715,7 @@ function updatePriceCalculationInfo(type, appPrice, materialPrice, duree) {
             calculationText += ' × 12 mois × 0.9 (remise 10%)';
         }
         
-        infoDiv.innerHTML = `
-            <div class="calculation-detail">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="12" cy="12" r="10"></circle>
-                    <path d="M12 16v-4"></path>
-                    <path d="M12 8h.01"></path>
-                </svg>
-                ${calculationText}
-            </div>
-        `;
+        infoDiv.innerHTML = ``;
         
         basePriceGroup.appendChild(infoDiv);
     }
@@ -837,8 +750,10 @@ function updatePricingPreview() {
     const materialSelect = document.getElementById('modele_materiel_id');
     const selectedMaterial = materialSelect.options[materialSelect.selectedIndex];
     const materialPrice = selectedMaterial && selectedMaterial.dataset.price ? parseFloat(selectedMaterial.dataset.price) : 0;
+    const depositPrice = selectedMaterial && selectedMaterial.dataset.deposit ? parseFloat(selectedMaterial.dataset.deposit) : 0;
     const typeSelect = document.getElementById('type_abonnement');
     const dureeSelect = document.getElementById('duree');
+    const userNumber = parseFloat(document.getElementById('nombre_utilisateurs_inclus').value) || 0;
     
     // Mise à jour de l'aperçu
     document.getElementById('previewBasePrice').textContent = basePrice.toFixed(2) + '€';
@@ -854,10 +769,21 @@ function updatePricingPreview() {
     const materialItem = document.getElementById('previewMaterial');
     if (['application_materiel', 'materiel_seul'].includes(typeSelect.value) && materialPrice > 0) {
         // Afficher le prix du matériel comme information, mais il est déjà inclus dans le prix de base
-        document.getElementById('previewMaterialPrice').textContent = materialPrice.toFixed(2) + '€/mois (inclus)';
+        totalMaterialPrice = materialPrice*userNumber;
+        document.getElementById('previewMaterialPrice').textContent = totalMaterialPrice.toFixed(2) + '€/mois (inclus)';
         materialItem.style.display = 'flex';
     } else {
         materialItem.style.display = 'none';
+    }
+
+    const depositItem = document.getElementById('previewDeposit');
+    if (['application_materiel', 'materiel_seul'].includes(typeSelect.value) && depositPrice > 0) {
+        // Afficher le prix du matériel comme information, mais il est déjà inclus dans le prix de base
+        totaldepositPrice = depositPrice*userNumber;
+        document.getElementById('previewDepositPrice').textContent = totaldepositPrice.toFixed(2) + '€';
+        depositItem.style.display = 'flex';
+    } else {
+        depositItem.style.display = 'none';
     }
     
     // Calcul du prix total selon la durée
@@ -901,6 +827,7 @@ function updatePricingPreview() {
 document.addEventListener('DOMContentLoaded', function() {
     const materialSelect = document.getElementById('modele_materiel_id');
     const basePriceInput = document.getElementById('prix_base');
+    const userInput = document.getElementById('nombre_utilisateurs_inclus');
     const dureeSelect = document.getElementById('duree');
     const typeSelect = document.getElementById('type_abonnement');
     
@@ -908,6 +835,7 @@ document.addEventListener('DOMContentLoaded', function() {
     dureeSelect.addEventListener('change', handleDurationChange);
     basePriceInput.addEventListener('input', handleBasePriceManualChange);
     basePriceInput.addEventListener('input', updatePricingPreview);
+    userInput.addEventListener('input', updatePricingPreview);
     document.getElementById('cout_utilisateur_supplementaire').addEventListener('input', updatePricingPreview);
     
     // Initialisation

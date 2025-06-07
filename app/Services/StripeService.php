@@ -163,6 +163,47 @@ class StripeService
     }
 
     /**
+     * Créer un prix pour les utilisateurs supplémentaires
+     */
+    public static function createDepositPrice($productId, $planData)
+    {
+        if (empty($planData['DepositAmount']) || $planData['DepositAmount'] <= 0) {
+            return null;
+        }
+
+        try {
+            self::init();
+        
+            $priceData = [
+                'product' => $productId,
+                'unit_amount' => (int)($planData['DepositAmount'] * 100),
+                'currency' => Config::get('stripe.currency', 'eur'),
+                'metadata' => [
+                    'plan_id' => $planData['id'] ?? 'new',
+                    'type' => 'deposit_amount',
+                    'base_price' => $planData['DepositAmount']
+                ]
+            ];
+
+            $price = Price::create($priceData);
+            
+            Logger::info('Prix caution Stripe créé', [
+                'price_id' => $price->id,
+                'amount' => $planData['DepositAmount']
+            ]);
+
+            return $price;
+            
+        } catch (Exception $e) {
+            Logger::error('Erreur création prix caution', [
+                'error' => $e->getMessage(),
+                'product_id' => $productId
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
      * Mettre à jour un produit Stripe
      */
     public static function updateProduct($productId, $planData)
@@ -348,7 +389,7 @@ class StripeService
 
     /**
      * Générer un lien de checkout pour un abonnement
-     */
+     
     public static function createCheckoutSession($priceId, $successUrl, $cancelUrl, $metadata = [])
     {
         try {
@@ -386,7 +427,7 @@ class StripeService
             ]);
             throw $e;
         }
-    }
+    }*/
 
     /**
      * Synchroniser les données depuis Stripe
@@ -512,6 +553,435 @@ class StripeService
                 'error' => $e->getMessage(),
                 'api_connection' => false
             ];
+        }
+    }
+
+    /**
+     * Vérifier si un customer a des modes de paiement valides
+     */
+    public static function hasValidPaymentMethod($customerId)
+    {
+        try {
+            self::init();
+            
+            $paymentMethods = \Stripe\PaymentMethod::all([
+                'customer' => $customerId,
+                'type' => 'card',
+            ]);
+            
+            // Vérifier qu'il y a au moins une carte valide
+            foreach ($paymentMethods->data as $pm) {
+                if ($pm->card && $pm->card->funding !== 'prepaid') {
+                    return true;
+                }
+            }
+            
+            return false;
+            
+        } catch (\Exception $e) {
+            Logger::error('Erreur vérification modes de paiement', [
+                'customer_id' => $customerId,
+                'error' => $e->getMessage()
+            ]);
+            return false;
+        }
+    }
+
+    /**
+     * Vérifier si on peut traiter un paiement pour un montant donné
+     */
+    public static function canProcessPayment($customerId, $amount)
+    {
+        try {
+            self::init();
+            
+            // Récupérer le mode de paiement par défaut
+            $customer = \Stripe\Customer::retrieve($customerId);
+            
+            if (!$customer->invoice_settings->default_payment_method) {
+                return false;
+            }
+            
+            // Pour les gros montants, on peut ajouter des vérifications supplémentaires
+            if ($amount > 500) {
+                // Vérifier l'historique de paiement du client
+                $invoices = \Stripe\Invoice::all([
+                    'customer' => $customerId,
+                    'status' => 'paid',
+                    'limit' => 5
+                ]);
+                
+                // Si le client n'a pas d'historique de paiement pour de gros montants, être prudent
+                return count($invoices->data) > 0;
+            }
+            
+            return true;
+            
+        } catch (\Exception $e) {
+            Logger::error('Erreur vérification capacité de paiement', [
+                'customer_id' => $customerId,
+                'amount' => $amount,
+                'error' => $e->getMessage()
+            ]);
+            return false;
+        }
+    }
+
+    /**
+     * Créer une session Checkout Stripe
+     */
+    public static function createCheckoutSession($sessionData)
+    {
+        try {
+            self::init();
+            
+            $session = \Stripe\Checkout\Session::create($sessionData);
+            
+            Logger::info('Session Checkout créée', [
+                'session_id' => $session->id,
+                'mode' => $sessionData['mode'],
+                'customer' => $sessionData['customer'] ?? 'new'
+            ]);
+            
+            return $session;
+            
+        } catch (\Exception $e) {
+            Logger::error('Erreur création session Checkout', [
+                'error' => $e->getMessage(),
+                'session_data' => array_diff_key($sessionData, ['line_items' => null])
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Récupérer une session Checkout
+     */
+    public static function retrieveCheckoutSession($sessionId)
+    {
+        try {
+            self::init();
+            
+            $session = \Stripe\Checkout\Session::retrieve([
+                'id' => $sessionId,
+                'expand' => ['subscription', 'payment_intent']
+            ]);
+            
+            return $session;
+            
+        } catch (\Exception $e) {
+            Logger::error('Erreur récupération session Checkout', [
+                'session_id' => $sessionId,
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Créer un prix one-time pour les dépôts de garantie
+     */
+    public static function createOneTimePrice($name, $amount, $metadata = [])
+    {
+        try {
+            self::init();
+            
+            // Créer d'abord un produit pour le dépôt
+            $product = \Stripe\Product::create([
+                'name' => $name,
+                'type' => 'service',
+                'metadata' => array_merge($metadata, [
+                    'type' => 'deposit',
+                    'created_by' => 'cover_ar_admin'
+                ])
+            ]);
+            
+            // Créer le prix one-time
+            $price = \Stripe\Price::create([
+                'product' => $product->id,
+                'unit_amount' => (int)($amount * 100), // Convertir en centimes
+                'currency' => Config::get('stripe.currency', 'eur'),
+                'metadata' => $metadata
+            ]);
+            
+            Logger::info('Prix one-time créé pour dépôt', [
+                'price_id' => $price->id,
+                'product_id' => $product->id,
+                'amount' => $amount
+            ]);
+            
+            return $price;
+            
+        } catch (\Exception $e) {
+            Logger::error('Erreur création prix one-time', [
+                'name' => $name,
+                'amount' => $amount,
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Créer un abonnement avec items multiples
+     */
+    public static function createSubscriptionWithItems($customerId, $items, $metadata = [])
+    {
+        try {
+            self::init();
+            
+            $subscriptionData = [
+                'customer' => $customerId,
+                'items' => $items,
+                'collection_method' => 'charge_automatically',
+                'metadata' => array_merge($metadata, [
+                    'created_by' => 'cover_ar_admin',
+                    'created_at' => date('Y-m-d H:i:s')
+                ])
+            ];
+            
+            $subscription = \Stripe\Subscription::create($subscriptionData);
+            
+            Logger::info('Abonnement multi-items créé', [
+                'subscription_id' => $subscription->id,
+                'customer_id' => $customerId,
+                'items_count' => count($items)
+            ]);
+            
+            return $subscription;
+            
+        } catch (\Exception $e) {
+            Logger::error('Erreur création abonnement multi-items', [
+                'customer_id' => $customerId,
+                'items_count' => count($items),
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Créer un invoice item
+     */
+    public static function createInvoiceItem($customerId, $amount, $description, $metadata = [])
+    {
+        try {
+            self::init();
+            
+            $invoiceItem = \Stripe\InvoiceItem::create([
+                'customer' => $customerId,
+                'amount' => (int)($amount * 100),
+                'currency' => Config::get('stripe.currency', 'eur'),
+                'description' => $description,
+                'metadata' => $metadata
+            ]);
+            
+            Logger::info('Invoice item créé', [
+                'invoice_item_id' => $invoiceItem->id,
+                'customer_id' => $customerId,
+                'amount' => $amount
+            ]);
+            
+            return $invoiceItem;
+            
+        } catch (\Exception $e) {
+            Logger::error('Erreur création invoice item', [
+                'customer_id' => $customerId,
+                'amount' => $amount,
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Créer et payer une facture immédiatement
+     */
+    public static function createAndPayInvoice($customerId, $autoAdvance = true)
+    {
+        try {
+            self::init();
+            
+            // Créer la facture
+            $invoice = \Stripe\Invoice::create([
+                'customer' => $customerId,
+                'auto_advance' => $autoAdvance,
+                'collection_method' => 'charge_automatically'
+            ]);
+            
+            // Finaliser la facture
+            $invoice->finalizeInvoice();
+            
+            // Tenter le paiement
+            if ($autoAdvance) {
+                $invoice->pay();
+            }
+            
+            Logger::info('Facture créée et payée', [
+                'invoice_id' => $invoice->id,
+                'customer_id' => $customerId,
+                'status' => $invoice->status,
+                'amount' => $invoice->amount_paid / 100
+            ]);
+            
+            return $invoice;
+            
+        } catch (\Exception $e) {
+            Logger::error('Erreur création/paiement facture', [
+                'customer_id' => $customerId,
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Mettre à jour un customer avec les informations de paiement
+     */
+    public static function updateCustomer($customerId, $data)
+    {
+        try {
+            self::init();
+            
+            $updateData = [];
+            
+            if (isset($data['raison_sociale'])) {
+                $updateData['name'] = $data['raison_sociale'];
+            }
+            
+            if (isset($data['email_facturation'])) {
+                $updateData['email'] = $data['email_facturation'];
+            }
+            
+            if (isset($data['adresse'], $data['code_postal'], $data['ville'], $data['pays'])) {
+                $updateData['address'] = [
+                    'line1' => $data['adresse'],
+                    'postal_code' => $data['code_postal'],
+                    'city' => $data['ville'],
+                    'country' => $data['pays'] === 'France' ? 'FR' : 'FR'
+                ];
+            }
+            
+            if (isset($data['numero_tva']) && !empty($data['numero_tva'])) {
+                $updateData['tax_ids'] = [
+                    [
+                        'type' => 'eu_vat',
+                        'value' => $data['numero_tva']
+                    ]
+                ];
+            }
+            
+            $customer = \Stripe\Customer::update($customerId, $updateData);
+            
+            Logger::info('Customer Stripe mis à jour', [
+                'customer_id' => $customerId,
+                'updated_fields' => array_keys($updateData)
+            ]);
+            
+            return $customer;
+            
+        } catch (\Exception $e) {
+            Logger::error('Erreur mise à jour customer', [
+                'customer_id' => $customerId,
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Créer un setup intent pour configurer un mode de paiement
+     */
+    public static function createSetupIntent($customerId, $metadata = [])
+    {
+        try {
+            self::init();
+            
+            $setupIntent = \Stripe\SetupIntent::create([
+                'customer' => $customerId,
+                'payment_method_types' => ['card'],
+                'usage' => 'off_session',
+                'metadata' => $metadata
+            ]);
+            
+            Logger::info('Setup Intent créé', [
+                'setup_intent_id' => $setupIntent->id,
+                'customer_id' => $customerId
+            ]);
+            
+            return $setupIntent;
+            
+        } catch (\Exception $e) {
+            Logger::error('Erreur création Setup Intent', [
+                'customer_id' => $customerId,
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Récupérer les modes de paiement d'un customer
+     */
+    public static function getCustomerPaymentMethods($customerId, $type = 'card')
+    {
+        try {
+            self::init();
+            
+            $paymentMethods = \Stripe\PaymentMethod::all([
+                'customer' => $customerId,
+                'type' => $type,
+            ]);
+            
+            return $paymentMethods->data;
+            
+        } catch (\Exception $e) {
+            Logger::error('Erreur récupération modes de paiement', [
+                'customer_id' => $customerId,
+                'type' => $type,
+                'error' => $e->getMessage()
+            ]);
+            return [];
+        }
+    }
+
+    /**
+     * Calculer le montant total d'un checkout (abonnement + dépôt)
+     */
+    public static function calculateCheckoutTotal($priceIds, $quantities = [], $oneTimePrices = [])
+    {
+        try {
+            self::init();
+            
+            $total = 0;
+            
+            // Récupérer les prix des abonnements
+            foreach ($priceIds as $index => $priceId) {
+                $price = \Stripe\Price::retrieve($priceId);
+                $quantity = $quantities[$index] ?? 1;
+                
+                if ($price->recurring) {
+                    // Pour les abonnements, prendre le montant de la première période
+                    $total += ($price->unit_amount / 100) * $quantity;
+                } else {
+                    // Pour les prix one-time
+                    $total += ($price->unit_amount / 100) * $quantity;
+                }
+            }
+            
+            // Ajouter les prix one-time supplémentaires
+            foreach ($oneTimePrices as $amount) {
+                $total += $amount;
+            }
+            
+            return $total;
+            
+        } catch (\Exception $e) {
+            Logger::error('Erreur calcul total checkout', [
+                'price_ids' => $priceIds,
+                'error' => $e->getMessage()
+            ]);
+            return 0;
         }
     }
 }

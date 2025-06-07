@@ -94,6 +94,8 @@ CREATE TABLE formules_abonnement (
     stripe_product_id VARCHAR(255) NULL,
     stripe_price_id VARCHAR(255) NULL,
     stripe_price_supplementaire_id VARCHAR(255) NULL, -- Pour les utilisateurs supplémentaires
+    stripe_caution_id VARCHAR(255) NULL, -- Pour les utilisateurs supplémentaires
+    DepositAmount DECIMAL(10,2) NULL,
     lien_inscription TEXT NULL,
     actif BOOLEAN DEFAULT TRUE,
     date_creation DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -107,6 +109,7 @@ CREATE TABLE abonnements_clients (
     formule_id INT NOT NULL,
     type_abonnement ENUM('principal', 'supplementaire') NOT NULL DEFAULT 'principal',
     stripe_subscription_id VARCHAR(255) UNIQUE,
+    stripe_checkout_session_id VARCHAR(255) UNIQUE,
     statut ENUM('actif', 'suspendu', 'annule', 'en_attente') DEFAULT 'en_attente',
     date_debut DATE NOT NULL,
     date_fin DATE NULL,

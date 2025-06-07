@@ -4,8 +4,6 @@ require_once 'app/Views/layouts/main.php';
 
 function renderContent() {
     global $materials;
-
-    print_r($materials);
 ?>
 
 <div class="subscription-plan-create">
@@ -71,6 +69,21 @@ function renderContent() {
                                 Annuelle
                             </option>
                         </select>
+                    </div>
+                </div>
+            </div>
+
+            <div class="form-section">
+                <h3>Tarification</h3>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="prix_base">Prix de base (€) *</label>
+                        <input type="number" id="prix_base" name="prix_base" 
+                               min="0" step="0.10" required 
+                               value="<?= htmlspecialchars($_POST['prix_base'] ?? '') ?>"
+                               placeholder="0.00" data-baseAppPrice="90.00">
+                        <small class="form-help">Prix de base de la formule (hors utilisateurs supplémentaires)</small>
                     </div>
                 </div>
             </div>
@@ -144,26 +157,14 @@ function renderContent() {
                         <div class="material-detail">
                             <span class="detail-label">Dépôt de garantie :</span>
                             <span class="detail-value" id="materialDeposit">-</span>
+                            <input type="hidden" name="DepositAmount" value="<?= $material['depot_garantie'] ?? '' ?>">
                         </div>
                     </div>
                 </div>
             </div>
 
             <!-- Tarification -->
-            <div class="form-section">
-                <h3>Tarification</h3>
-                
-                <div class="form-row">
-                    <div class="form-group">
-                        <label for="prix_base">Prix de base (€) *</label>
-                        <input type="number" id="prix_base" name="prix_base" 
-                               min="0" step="0.01" required 
-                               value="<?= htmlspecialchars($_POST['prix_base'] ?? '') ?>"
-                               placeholder="0.00">
-                        <small class="form-help">Prix de base de la formule (hors utilisateurs supplémentaires)</small>
-                    </div>
-                </div>
-                
+            <div class="form-section">                
                 <div class="pricing-preview" id="pricingPreview">
                     <h4>Aperçu tarifaire</h4>
                     <div class="preview-content">
@@ -178,6 +179,10 @@ function renderContent() {
                         <div class="preview-item" id="previewMaterial" style="display: none;">
                             <span class="preview-label">Matériel inclus :</span>
                             <span class="preview-value" id="previewMaterialPrice">0,00€/mois</span>
+                        </div>
+                        <div class="preview-item" id="previewDeposit" style="display: none;">
+                            <span class="preview-label">Dépôt de Garantie :</span>
+                            <span class="preview-value" id="previewDepositPrice">0,00€</span>
                         </div>
                     </div>
                 </div>
@@ -360,6 +365,7 @@ function renderContent() {
     border-radius: 3px;
     position: relative;
     transition: var(--transition);
+    display: inline-block;
 }
 
 .checkbox-label input[type="checkbox"]:checked + .checkbox-custom {
@@ -683,8 +689,6 @@ function updatePriceCalculationInfo(type, appPrice, materialPrice, duree) {
     if ((type === 'application_materiel' || type === 'materiel_seul') && materialPrice > 0) {
         const basePriceGroup = document.getElementById('prix_base').closest('.form-group');
         const infoDiv = document.createElement('div');
-        infoDiv.id = 'priceCalculationInfo';
-        infoDiv.className = 'price-calculation-info';
         
         let calculationText = '';
         if (type === 'application_materiel') {
@@ -697,16 +701,7 @@ function updatePriceCalculationInfo(type, appPrice, materialPrice, duree) {
             calculationText += ' × 12 mois × 0.9 (remise 10%)';
         }
         
-        infoDiv.innerHTML = `
-            <div class="calculation-detail">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="12" cy="12" r="10"></circle>
-                    <path d="M12 16v-4"></path>
-                    <path d="M12 8h.01"></path>
-                </svg>
-                ${calculationText}
-            </div>
-        `;
+        infoDiv.innerHTML = ``;
         
         basePriceGroup.appendChild(infoDiv);
     }
@@ -741,8 +736,10 @@ function updatePricingPreview() {
     const materialSelect = document.getElementById('modele_materiel_id');
     const selectedMaterial = materialSelect.options[materialSelect.selectedIndex];
     const materialPrice = selectedMaterial && selectedMaterial.dataset.price ? parseFloat(selectedMaterial.dataset.price) : 0;
+    const depositPrice = selectedMaterial && selectedMaterial.dataset.deposit ? parseFloat(selectedMaterial.dataset.deposit) : 0;
     const typeSelect = document.getElementById('type_abonnement');
     const dureeSelect = document.getElementById('duree');
+    const userNumber = parseFloat(document.getElementById('nombre_utilisateurs_inclus').value) || 0;
     
     // Mise à jour de l'aperçu
     document.getElementById('previewBasePrice').textContent = basePrice.toFixed(2) + '€';
@@ -758,10 +755,21 @@ function updatePricingPreview() {
     const materialItem = document.getElementById('previewMaterial');
     if (['application_materiel', 'materiel_seul'].includes(typeSelect.value) && materialPrice > 0) {
         // Afficher le prix du matériel comme information, mais il est déjà inclus dans le prix de base
-        document.getElementById('previewMaterialPrice').textContent = materialPrice.toFixed(2) + '€/mois (inclus)';
+        totalMaterialPrice = materialPrice*userNumber;
+        document.getElementById('previewMaterialPrice').textContent = totalMaterialPrice.toFixed(2) + '€/mois (inclus)';
         materialItem.style.display = 'flex';
     } else {
         materialItem.style.display = 'none';
+    }
+
+    const depositItem = document.getElementById('previewDeposit');
+    if (['application_materiel', 'materiel_seul'].includes(typeSelect.value) && depositPrice > 0) {
+        // Afficher le prix du matériel comme information, mais il est déjà inclus dans le prix de base
+        totaldepositPrice = depositPrice*userNumber;
+        document.getElementById('previewDepositPrice').textContent = totaldepositPrice.toFixed(2) + '€';
+        depositItem.style.display = 'flex';
+    } else {
+        depositItem.style.display = 'none';
     }
     
     // Calcul du prix total selon la durée
@@ -807,11 +815,14 @@ document.addEventListener('DOMContentLoaded', function() {
     const basePriceInput = document.getElementById('prix_base');
     const dureeSelect = document.getElementById('duree');
     const typeSelect = document.getElementById('type_abonnement');
+    const userInput = document.getElementById('nombre_utilisateurs_inclus');
     
     materialSelect.addEventListener('change', updateMaterialInfo);
     dureeSelect.addEventListener('change', handleDurationChange);
     basePriceInput.addEventListener('input', handleBasePriceManualChange);
     basePriceInput.addEventListener('input', updatePricingPreview);
+    basePriceInput.addEventListener('input', updatePriceCalculationInfo);
+    userInput.addEventListener('input', updatePricingPreview);
     document.getElementById('cout_utilisateur_supplementaire').addEventListener('input', updatePricingPreview);
     
     // Initialisation
